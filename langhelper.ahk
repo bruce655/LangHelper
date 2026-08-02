@@ -2,7 +2,8 @@
 #SingleInstance Force
 ; ============================================================================== 
 ;  LangHelper — Ctrl+C, Ctrl+C clipboard translator
-;  Pairs with prompt.md and langhelper.ps1 (which calls `gh models run`).
+;  Pairs with prompt.md and langhelper.ps1 (which posts to the Azure AI Foundry
+;  /chat/completions endpoint).
 ; ============================================================================== 
 
 ; --- Paths --------------------------------------------------------------------
@@ -35,41 +36,95 @@ FeatureCatalog := [
     ["ROMANIZE",          "Romanization (Pinyin/Romaji/RR)"]
 ]
 
-ModelCatalog := [
-    "openai/gpt-4.1-mini",
-    "openai/gpt-5-chat",
-    "openai/gpt-4.1-nano",
-    "openai/gpt-4.1",
-    "openai/gpt-4o-mini",
-    "mistral-ai/mistral-small-2503",
-    "meta/llama-3.3-70b-instruct"
-]
+; "(omit)" leaves reasoning_effort out of the request entirely, which is what
+; non-reasoning deployments require. "none" is only accepted by gpt-5.1 and later.
+ReasoningCatalog := ["(omit)", "none", "minimal", "low", "medium", "high"]
+
+ReasoningLabel(value) {
+    return Trim(value) = "" ? "(omit)" : Trim(value)
+}
+
+; Deployment names are per-resource, so the ini is the only source of truth for
+; the picker. This is just the last-resort value when `Model=` is absent/blank.
+DefaultModel := "gpt-5.4-mini"
 
 ; --- Settings (loaded from INI with defaults) --------------------------------
 ; PromptFile: optional path to an external prompt/spec file (e.g. a SKILL.md /
 ;             TeamsPrompt.md). Empty means use the bundled prompt.md.
+; Endpoint:   Foundry resource URL, e.g. https://my-res.openai.azure.com
+; EntraSubscription / EntraTenant: pin which az account the token comes from.
+;             Subscription wins; the CLI rejects both at once.
+; ReasoningEffort: none/minimal/low/medium/high for reasoning models; empty omits
+;             the field.
+; Model:      comma-separated deployment names. The first one is the active
+;             model, the rest fill the picker.
 Settings := Map(
-    "Features",      IniRead(IniPath, "LangHelper", "Features",      "POLISH"),
-    "Model",         IniRead(IniPath, "LangHelper", "Model",         "openai/gpt-4.1-mini"),
-    "PromptFile",    IniRead(IniPath, "LangHelper", "PromptFile",    ""),
-    "AutoTranslate", IniRead(IniPath, "LangHelper", "AutoTranslate", "0"),
-    "SingleWindow",  IniRead(IniPath, "LangHelper", "SingleWindow",  "1")
+    "Features",          IniRead(IniPath, "LangHelper", "Features",          "POLISH"),
+    "Model",             IniRead(IniPath, "LangHelper", "Model",             DefaultModel),
+    "Endpoint",          IniRead(IniPath, "LangHelper", "Endpoint",          ""),
+    "EntraSubscription", IniRead(IniPath, "LangHelper", "EntraSubscription", ""),
+    "EntraTenant",       IniRead(IniPath, "LangHelper", "EntraTenant",       ""),
+    "ReasoningEffort",   IniRead(IniPath, "LangHelper", "ReasoningEffort",   ""),
+    "PromptFile",        IniRead(IniPath, "LangHelper", "PromptFile",        ""),
+    "AutoTranslate",     IniRead(IniPath, "LangHelper", "AutoTranslate",     "0"),
+    "SaveHistory",       IniRead(IniPath, "LangHelper", "SaveHistory",       "1"),
+    "SingleWindow",      IniRead(IniPath, "LangHelper", "SingleWindow",      "1")
 )
+
+ModelCatalog := ParseModelCatalog(Settings["Model"])
+Settings["Model"] := ModelCatalog[1]
+
+; The picker is exactly what the ini lists: a hardcoded name that isn't deployed
+; on your own Foundry resource would only 404.
+ParseModelCatalog(raw) {
+    global DefaultModel
+    list := []
+    for part in StrSplit(raw, ",") {
+        name := Trim(part)
+        if (name = "" || HasModel(list, name))
+            continue
+        list.Push(name)
+    }
+    return list.Length ? list : [DefaultModel]
+}
+
+HasModel(list, name) {
+    for m in list
+        if (m = name)
+            return true
+    return false
+}
+
+; The active model is written back first so it survives a restart. ModelCatalog
+; itself is never reordered at runtime -- open windows map dropdown index to it.
+ModelIniValue() {
+    global Settings, ModelCatalog
+    out := Settings["Model"]
+    for m in ModelCatalog
+        if (m != Settings["Model"])
+            out .= "," m
+    return out
+}
 
 SaveSettings() {
     global Settings, IniPath
-    IniWrite Settings["Features"],      IniPath, "LangHelper", "Features"
-    IniWrite Settings["Model"],         IniPath, "LangHelper", "Model"
-    IniWrite Settings["PromptFile"],    IniPath, "LangHelper", "PromptFile"
-    IniWrite Settings["AutoTranslate"], IniPath, "LangHelper", "AutoTranslate"
-    IniWrite Settings["SingleWindow"],  IniPath, "LangHelper", "SingleWindow"
+    IniWrite Settings["Features"],       IniPath, "LangHelper", "Features"
+    IniWrite ModelIniValue(),            IniPath, "LangHelper", "Model"
+    IniWrite Settings["Endpoint"],       IniPath, "LangHelper", "Endpoint"
+    IniWrite Settings["EntraSubscription"], IniPath, "LangHelper", "EntraSubscription"
+    IniWrite Settings["EntraTenant"],     IniPath, "LangHelper", "EntraTenant"
+    IniWrite Settings["ReasoningEffort"], IniPath, "LangHelper", "ReasoningEffort"
+    IniWrite Settings["PromptFile"],     IniPath, "LangHelper", "PromptFile"
+    IniWrite Settings["AutoTranslate"],  IniPath, "LangHelper", "AutoTranslate"
+    IniWrite Settings["SaveHistory"],    IniPath, "LangHelper", "SaveHistory"
+    IniWrite Settings["SingleWindow"],   IniPath, "LangHelper", "SingleWindow"
 }
 
 ; --- Tray menu ---------------------------------------------------------------
 BuildTrayMenu()
 
 BuildTrayMenu() {
-    global Settings, ModelCatalog, PromptPath, LogPath
+    global Settings, ModelCatalog, ReasoningCatalog, PromptPath, LogPath
     tray := A_TrayMenu
     tray.Delete()
     tray.Add("LangHelper", (*) => 0)
@@ -85,6 +140,14 @@ BuildTrayMenu() {
     }
     tray.Add("Model", modelMenu)
 
+    reasonMenu := Menu()
+    for r in ReasoningCatalog {
+        reasonMenu.Add(r, ChooseReasoning)
+        if (r = ReasoningLabel(Settings["ReasoningEffort"]))
+            reasonMenu.Check(r)
+    }
+    tray.Add("Reasoning", reasonMenu)
+
     tray.Add()
     tray.Add("Open prompt.md",   (*) => Run('"' PromptPath '"'))
     tray.Add("Show last result", (*) => ShowLastResult())
@@ -98,6 +161,9 @@ BuildTrayMenu() {
     A_IconTip := "LangHelper — Ctrl+C, Ctrl+C to translate`nFeatures: " Settings["Features"] "`nModel: " Settings["Model"]
 }
 
+; Only safe for values that cannot contain a double quote (paths, ini config).
+; cmd.exe does not honour the backtick, so a quote here would end the argument
+; and let `&` start a new command -- untrusted text must travel by file.
 PsArg(value) {
     return '"' StrReplace(value, '"', '`"') '"'
 }
@@ -141,12 +207,19 @@ RecordHistory(sourceText, resultText, features, model) {
 SearchHistory(query, limit := 80) {
     global HistoryDbPath
     outPath := A_Temp "\langhelper_history_search.txt"
+    queryPath := A_Temp "\langhelper_history_query.txt"
     try FileDelete outPath
+    try FileDelete queryPath
+    FileAppend(query, queryPath, "UTF-8")
     args := '-Action Search -DbPath ' PsArg(HistoryDbPath)
-        . ' -Query ' PsArg(query)
+        . ' -QueryFile ' PsArg(queryPath)
         . ' -Limit ' limit
         . ' -OutputFile ' PsArg(outPath)
-    return RunHistoryCommand(args, outPath)
+    try {
+        return RunHistoryCommand(args, outPath)
+    } finally {
+        try FileDelete queryPath
+    }
 }
 
 GetHistoryItem(id) {
@@ -481,6 +554,14 @@ ChooseModel(item, *) {
     TrayTip("LangHelper", "Model set to " item, 0x1)
 }
 
+ChooseReasoning(item, *) {
+    global Settings
+    Settings["ReasoningEffort"] := (item = "(omit)") ? "" : item
+    SaveSettings()
+    BuildTrayMenu()
+    TrayTip("LangHelper", "Reasoning effort: " item, 0x1)
+}
+
 OpenSettings() {
     text := ""
     try text := A_Clipboard
@@ -534,7 +615,7 @@ TriggerTranslation(dryRun) {
     ShowTranslatorWindow(text, true)
 }
 
-; --- Backend call (AHK -> PowerShell -> gh models run) ----------------------
+; --- Backend call (AHK -> PowerShell -> chat completions API) ---------------
 CallBackend(text, features, model, dryRun) {
     global PsPath, Settings
     tmpIn  := A_Temp "\langhelper_in.txt"
@@ -549,6 +630,15 @@ CallBackend(text, features, model, dryRun) {
         . ' -Model "'    model    '"'
         . ' -InputFile "'  tmpIn  '"'
         . ' -OutputFile "' tmpOut '"'
+    if (Trim(Settings["Endpoint"]) != "")
+        psArgs .= ' -Endpoint ' PsArg(Trim(Settings["Endpoint"]))
+    if (Trim(Settings["EntraSubscription"]) != "")
+        psArgs .= ' -EntraSubscription ' PsArg(Trim(Settings["EntraSubscription"]))
+    else if (Trim(Settings["EntraTenant"]) != "")
+        psArgs .= ' -EntraTenant ' PsArg(Trim(Settings["EntraTenant"]))
+    ; Non-reasoning deployments reject the field, so only send it when set.
+    if (Trim(Settings["ReasoningEffort"]) != "")
+        psArgs .= ' -ReasoningEffort "' Trim(Settings["ReasoningEffort"]) '"'
     if (Trim(Settings["PromptFile"]) != "")
         psArgs .= ' -PromptFile ' PsArg(Settings["PromptFile"])
     if (dryRun)
@@ -754,6 +844,8 @@ ShowTranslatorWindow(sourceText, autoRun) {
     rerunBtn := g.Add("Button", "x16 y636 w150 h30 Default", "&Re-translate")
     copyBtn  := g.Add("Button", "x176 y636 w140 h30", "&Copy result")
     historyBtn := g.Add("Button", "x326 y636 w110 h30", "&History")
+    saveHistChecked := (Settings["SaveHistory"] != "0") ? " Checked" : ""
+    saveHistChk := g.Add("CheckBox", "x446 y641 w150" saveHistChecked, "Save to history")
     closeBtn := g.Add("Button", "x716 y636 w120 h30", "&Close")
 
     state := { running: false, restartRequested: false, seq: 0 }
@@ -860,6 +952,7 @@ ShowTranslatorWindow(sourceText, autoRun) {
         rerunBtn.Move(margin, actionY, 150, btnH)
         copyBtn.Move(margin + 160, actionY, 140, btnH)
         historyBtn.Move(margin + 310, actionY, 110, btnH)
+        saveHistChk.Move(margin + 430, actionY + 5, 150)
         closeBtn.Move(margin + width - 120, actionY, 120, btnH)
     }
 
@@ -929,7 +1022,8 @@ ShowTranslatorWindow(sourceText, autoRun) {
         }
         try FileDelete LastResultPath
         FileAppend(result.output, LastResultPath, "UTF-8")
-        SetTimer(() => RecordHistory(textToTranslate, result.output, feat, modl), -10)
+        if (saveHistChk.Value)
+            SetTimer(() => RecordHistory(textToTranslate, result.output, feat, modl), -10)
         elapsed := (A_TickCount - startTick) / 1000
         SetStatus("Done. Translation copied to clipboard. " Format("{:.3f}", elapsed) "s", "059669")
     }
@@ -952,6 +1046,12 @@ ShowTranslatorWindow(sourceText, autoRun) {
         SaveSettings()
         if (autoChk.Value)
             ForceTranslate()
+    }
+
+    OnSaveHistoryToggle(*) {
+        Settings["SaveHistory"] := saveHistChk.Value ? "1" : "0"
+        SaveSettings()
+        SetStatus(saveHistChk.Value ? "Translations are saved to history." : "History saving is off for new translations.", "2563EB")
     }
 
     OnSingleToggle(*) {
@@ -1070,6 +1170,7 @@ ShowTranslatorWindow(sourceText, autoRun) {
     inputEdit.OnEvent("Change", DebouncedTranslate)
     inputEdit.OnEvent("Change", UpdateCharCount)
     autoChk.OnEvent("Click", OnAutoToggle)
+    saveHistChk.OnEvent("Click", OnSaveHistoryToggle)
     singleWinChk.OnEvent("Click", OnSingleToggle)
     cfgBtn.OnEvent("Click", OpenFeatureConfig)
     ddModel.OnEvent("Change", DebouncedTranslate)

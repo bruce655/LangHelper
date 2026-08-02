@@ -2,4 +2,11 @@
 langhelper.log
 langhelper_history.sqlite
 
+# Local config: holds the endpoint and Entra subscription/tenant ids.
+# Ship langhelper.ini.example instead.
+langhelper.ini
 *.ini.bk
+
+# Safety net: auth is Entra-only and writes no key files, but never let one
+# reach a commit if it lands here.
+*.key

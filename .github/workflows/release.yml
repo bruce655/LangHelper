@@ -129,6 +129,7 @@ jobs:
             'langhelper.ahk',
             'langhelper.ps1',
             'langhelper-history.ps1',
+            'langhelper.ini.example',
             'prompt.md',
             'README.md'
           ) | ForEach-Object { Copy-Item $_ $staging }

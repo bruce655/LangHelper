@@ -568,14 +568,14 @@ ShowLastResult() {
 }
 
 ChooseModel(item, *) {
-    global Settings, ActiveTranslator
+    global Settings, TranslatorWindows
     Settings["Model"] := item
     SaveSettings()
     BuildTrayMenu()
-    ; An open window translates with its own dropdown, so leaving it stale would
-    ; silently undo this choice on the next run.
-    if (IsObject(ActiveTranslator))
-        try ActiveTranslator.setModel.Call(item)
+    ; Every open window translates with its own dropdown and writes that value
+    ; back, so any window left stale would silently undo this choice.
+    for win in TranslatorWindows
+        try win.setModel.Call(item)
     TrayTip("LangHelper", "Model set to " item, 0x1)
 }
 
@@ -595,6 +595,19 @@ OpenSettings() {
 
 ; --- Single active translator window -----------------------------------------
 ActiveTranslator := ""
+
+; Every open window, not just the reuse target: with SingleWindow=0 there can be
+; several, and all of them need to follow a tray model change.
+TranslatorWindows := []
+
+UnregisterTranslator(g) {
+    global TranslatorWindows
+    Loop TranslatorWindows.Length
+        if (TranslatorWindows[A_Index].gui = g) {
+            TranslatorWindows.RemoveAt(A_Index)
+            return
+        }
+}
 
 ; --- Double-Ctrl+C trigger ---------------------------------------------------
 LastCopyTick := 0
@@ -783,7 +796,7 @@ IsModularPromptFile(path) {
 }
 
 ShowTranslatorWindow(sourceText, autoRun) {
-    global FeatureCatalog, ModelCatalog, Settings, LastResultPath, ActiveTranslator
+    global FeatureCatalog, ModelCatalog, Settings, LastResultPath, ActiveTranslator, TranslatorWindows
 
     ; Reuse the existing window when Single-window mode is on and one is open.
     if (Settings["SingleWindow"] != "0" && IsObject(ActiveTranslator)) {
@@ -1054,7 +1067,9 @@ ShowTranslatorWindow(sourceText, autoRun) {
             A_Clipboard      := ToCRLF(result.output)
         }
         try FileDelete LastResultPath
-        FileAppend(result.output, LastResultPath, "UTF-8")
+        ; Best-effort cache: a locked-down or missing LOCALAPPDATA must not take
+        ; the translation down with it.
+        try FileAppend(result.output, LastResultPath, "UTF-8")
         if (saveHistChk.Value)
             SetTimer(() => RecordHistory(textToTranslate, result.output, feat, modl), -10)
         elapsed := (A_TickCount - startTick) / 1000
@@ -1094,7 +1109,7 @@ ShowTranslatorWindow(sourceText, autoRun) {
         ; Turning single-window on makes this window the reuse target;
         ; turning it off stops future triggers from reusing it.
         if (singleWinChk.Value)
-            ActiveTranslator := { gui: g, update: UpdateWindow, setModel: SyncModelChoice }
+            ActiveTranslator := winRef
         else if (IsObject(ActiveTranslator) && ActiveTranslator.gui = g)
             ActiveTranslator := ""
     }
@@ -1236,6 +1251,7 @@ ShowTranslatorWindow(sourceText, autoRun) {
 
     DestroyWindow(*) {
         global ActiveTranslator
+        UnregisterTranslator(g)
         if (IsObject(ActiveTranslator) && ActiveTranslator.gui = g)
             ActiveTranslator := ""
         g.Destroy()
@@ -1253,7 +1269,9 @@ ShowTranslatorWindow(sourceText, autoRun) {
     g.OnEvent("Escape", DestroyWindow)
     g.OnEvent("Close",  DestroyWindow)
 
-    ActiveTranslator := { gui: g, update: UpdateWindow, setModel: SyncModelChoice }
+    winRef := { gui: g, update: UpdateWindow, setModel: SyncModelChoice }
+    TranslatorWindows.Push(winRef)
+    ActiveTranslator := winRef
 
     g.Show("w900 h700 Center")
     Layout()

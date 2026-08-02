@@ -569,9 +569,11 @@ blocks by scanning the markdown.
     `langhelper.log` grew without bound (286 KB before this change) and had no
     rotation. The path is resolved on every write, so a long-running instance
     rolls over at the month boundary on its own.
-24. **Synced the tray model menu with the open window** — the window translates
+24. **Synced the tray model menu with every open window** — a window translates
     with its own dropdown and writes that back to the ini, so choosing a model
     from the tray while a window was open silently reverted on the next run.
+    `SingleWindow=0` allows several windows at once, so all of them are tracked
+    and updated rather than just the most recent.
 25. **Escaped `%` and `_` in history search** — they were passed straight into
     `LIKE`, so searching for `100%` matched far more than it should. Not a
     security issue (`Quote-Sql` already handles quoting), just wrong results.

@@ -145,6 +145,37 @@ SaveSettings() {
     IniWrite Settings["SingleWindow"],   IniPath, "LangHelper", "SingleWindow"
 }
 
+StartupShortcutPath() {
+    return A_Startup "\LangHelper.lnk"
+}
+
+IsStartupEnabled() {
+    return FileExist(StartupShortcutPath()) != ""
+}
+
+ToggleStartup(*) {
+    shortcutPath := StartupShortcutPath()
+    try {
+        if (FileExist(shortcutPath)) {
+            FileDelete shortcutPath
+            enabled := false
+        } else {
+            shortcut := ComObject("WScript.Shell").CreateShortcut(shortcutPath)
+            shortcut.TargetPath := A_IsCompiled ? A_ScriptFullPath : A_AhkPath
+            shortcut.Arguments := A_IsCompiled ? "" : '"' A_ScriptFullPath '"'
+            shortcut.WorkingDirectory := A_ScriptDir
+            shortcut.IconLocation := (A_IsCompiled ? A_ScriptFullPath : A_AhkPath) ",0"
+            shortcut.Description := "LangHelper clipboard translator"
+            shortcut.Save()
+            enabled := true
+        }
+        BuildTrayMenu()
+        TrayTip("LangHelper", "Start with Windows " (enabled ? "enabled" : "disabled"), 0x1)
+    } catch as err {
+        MsgBox("Could not update Windows startup:`n`n" err.Message, "LangHelper", 16)
+    }
+}
+
 ; --- Tray menu ---------------------------------------------------------------
 BuildTrayMenu()
 
@@ -173,6 +204,10 @@ BuildTrayMenu() {
     }
     tray.Add("Reasoning", reasonMenu)
 
+    tray.Add()
+    tray.Add("Start with Windows", ToggleStartup)
+    if (IsStartupEnabled())
+        tray.Check("Start with Windows")
     tray.Add()
     tray.Add("Open prompt.md",   (*) => Run('"' PromptPath '"'))
     tray.Add("Show last result", (*) => ShowLastResult())

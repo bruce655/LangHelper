@@ -276,24 +276,14 @@ gains nothing from it, and reasoning tokens are billed at the output rate.
 
 Then tray → **Reload script**.
 
-## Auto-start on login (recommended)
+## Auto-start on login
 
-Drop a shortcut into the Startup folder so LangHelper comes up after every VM
-reboot / user login:
+Right-click the LangHelper tray icon and select **Start with Windows**. A check
+mark means LangHelper will launch automatically after the current user signs in,
+including after a reboot. Select it again to disable automatic startup.
 
-```powershell
-$wsh = New-Object -ComObject WScript.Shell
-$lnk = $wsh.CreateShortcut("$([Environment]::GetFolderPath('Startup'))\LangHelper.lnk")
-$lnk.TargetPath       = (Get-Command AutoHotkey64.exe).Source
-$lnk.Arguments        = '"C:\path\to\LangHelper\langhelper.ahk"'
-$lnk.WorkingDirectory = 'C:\path\to\LangHelper'
-$lnk.IconLocation     = (Get-Command AutoHotkey64.exe).Source + ',0'
-$lnk.Description      = 'LangHelper - Ctrl+C,Ctrl+C clipboard translator'
-$lnk.Save()
-```
-
-To inspect / remove later: `explorer.exe shell:startup` and delete
-`LangHelper.lnk`.
+The toggle manages `LangHelper.lnk` in the current user's Windows Startup
+folder. To inspect it directly, run `explorer.exe shell:startup`.
 
 ## Daily use
 
@@ -394,6 +384,8 @@ Change anytime via tray → **Model ▸** or the dropdown in the translator wind
 
 - **Open translator window…** — opens the combined window using the current clipboard.
 - **Model ▸** — quick model switcher (checked = current).
+- **Start with Windows** — enable or disable launching LangHelper automatically
+   when the current user signs in.
 - **Open prompt.md** — opens the prompt in your default editor.
 - **Show last result** — re-opens the previous translation in a viewer window.
 - **Search history...** — opens a SQLite-backed searchable history of completed

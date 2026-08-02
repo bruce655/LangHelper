@@ -676,6 +676,10 @@ CallBackend(text, features, model, dryRun) {
     tmpIn  := tmpBase "_in.txt"
     tmpOut := tmpBase "_out.txt"
     tmpErr := tmpBase "_err.txt"
+    ; A_TickCount restarts at boot, so a file left behind by a crash can collide
+    ; with a later name. Both this write and the redirect below append.
+    for f in [tmpIn, tmpOut, tmpErr]
+        try FileDelete f
     try {
         FileAppend(text, tmpIn, "UTF-8")
 

@@ -183,11 +183,14 @@ PsArg(value) {
     return '"' StrReplace(value, '"', '`"') '"'
 }
 
-; The log is the first thing users paste when asking for help. Only the account
-; identifiers and the prompt path are masked; other local paths stay readable
-; because they are what makes the log useful.
+; The log is the first thing users paste when asking for help. Account
+; identifiers and the prompt path are masked outright; the rest of the command
+; line stays readable because it is what makes the log worth reading, but the
+; profile prefix is collapsed so the user name does not ride along in it.
 RedactArgs(line) {
-    return RegExReplace(line, 'i)(-(?:Endpoint|EntraSubscription|EntraTenant|PromptFile))\s+"[^"]*"', '$1 "***"')
+    static UserProfile := EnvGet("USERPROFILE")
+    line := RegExReplace(line, 'i)(-(?:Endpoint|EntraSubscription|EntraTenant|PromptFile))\s+"[^"]*"', '$1 "***"')
+    return UserProfile != "" ? StrReplace(line, UserProfile, "%USERPROFILE%") : line
 }
 
 RunHistoryCommand(args, outPath := "") {

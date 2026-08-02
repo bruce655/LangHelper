@@ -69,7 +69,7 @@ langhelper.ahk  ──reads clipboard──►  opens translator window
 | [langhelper.ini.example](langhelper.ini.example) | Tracked template for `langhelper.ini`. Copy it and fill in your own endpoint and Entra ids. |
 | `langhelper.ini` | Your local settings (endpoint, features, model, and the options in [Settings](#settings-langhelperini)). Git-ignored so subscription and tenant ids never leave your machine. |
 | `langhelper_history.sqlite` | Auto-created. Local searchable history database. |
-| `logs/langhelper_YYYYMM.log` | Auto-created. Timestamped log of every trigger and backend call, one file per month. Endpoint, Entra ids, and the prompt-file path are masked. |
+| `logs/langhelper_YYYYMM.log` | Auto-created. Timestamped log of every trigger and backend call, one file per month. Endpoint, Entra ids, and the prompt-file path are masked, and the profile path is collapsed to `%USERPROFILE%`. |
 | `%LOCALAPPDATA%\LangHelper\` | Auto-created. Holds `last-result.txt` (tray *Show last result*) and the DPAPI-encrypted `entra-token.dat`. |
 
 ## AutoHotkey 介紹
@@ -459,7 +459,7 @@ blocks by scanning the markdown.
 | Ctrl+C, Ctrl+C does nothing, but tray → **Dry-run** works | Another app is eating the second Ctrl+C. Edit [langhelper.ahk](langhelper.ahk): change `~^c::` to e.g. `~^!c::` (Ctrl+Alt+C) and reload. |
 | Empty / garbled CJK output | Confirm [prompt.md](prompt.md) is saved as UTF-8 (no BOM). |
 | "Could not find Core block" | Don't rename the `## Core` heading or remove its fenced code block in [prompt.md](prompt.md). |
-| Need to see what happened | Tray → **Open log file**. Every trigger, command line, exit code, and output length is logged. The endpoint, Entra ids, and prompt-file path are masked; the script and temp paths are not, so they still show your user name. |
+| Need to see what happened | Tray → **Open log file**. Every trigger, command line, exit code, and output length is logged. The endpoint, Entra ids, and prompt-file path are masked, and the profile path is collapsed to `%USERPROFILE%`, so neither your account nor your user name appears. |
 
 ## Build history (what we did)
 
@@ -589,6 +589,11 @@ blocks by scanning the markdown.
 28. **Moved `last-result.txt` to `%LOCALAPPDATA%\LangHelper`** — it is meant to
     survive between runs, but `%TEMP%` is exactly what Storage Sense clears. The
     scratch files stay in `%TEMP%`, which is where transient IPC belongs.
+29. **Collapsed the profile path in the log** — masking the endpoint and Entra
+    ids was not enough to make a log safe to paste: the scratch and cache paths
+    sit under `%USERPROFILE%`, so every line still carried the Windows user
+    name. The prefix is now replaced rather than removed, which keeps the paths
+    readable for debugging.
 
 ## Publishing a release (maintainers)
 

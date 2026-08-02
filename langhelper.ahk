@@ -13,13 +13,38 @@ PromptPath := ScriptDir "\prompt.md"
 PsPath     := ScriptDir "\langhelper.ps1"
 HistoryPsPath := ScriptDir "\langhelper-history.ps1"
 HistoryDbPath := ScriptDir "\langhelper_history.sqlite"
-LogPath    := ScriptDir "\langhelper.log"
-LastResultPath := A_Temp "\langhelper_last_result.txt"
+LogDir     := ScriptDir "\logs"
 
+; Survives across runs, so it belongs beside the token cache rather than in
+; %TEMP%, which Storage Sense clears. An unset LOCALAPPDATA would leave a
+; drive-relative "\LangHelper", so the cache is disabled instead of landing in
+; the drive root.
+LastResultPath := ""
+if (LocalAppData := EnvGet("LOCALAPPDATA")) {
+    LocalAppDir := LocalAppData "\LangHelper"
+    if !DirExist(LocalAppDir)
+        try DirCreate(LocalAppDir)
+    LastResultPath := LocalAppDir "\last-result.txt"
+}
+
+; One file per month, resolved on every write so a long-running instance rolls
+; over at the month boundary instead of growing without bound.
+CurrentLogPath() {
+    global LogDir
+    if !DirExist(LogDir)
+        try DirCreate(LogDir)
+    return LogDir "\langhelper_" FormatTime(, "yyyyMM") ".log"
+}
+
+; The profile prefix is collapsed here rather than at each call site, because
+; any line can carry a scratch or cache path -- including error text relayed
+; from PowerShell.
 Log(msg) {
-    global LogPath
+    static UserProfile := EnvGet("USERPROFILE")
+    if (UserProfile != "")
+        msg := StrReplace(msg, UserProfile, "%USERPROFILE%")
     line := FormatTime(, "yyyy-MM-dd HH:mm:ss") "  " msg "`r`n"
-    try FileAppend(line, LogPath, "UTF-8")
+    try FileAppend(line, CurrentLogPath(), "UTF-8")
 }
 Log("=== LangHelper start ===")
 
@@ -124,7 +149,7 @@ SaveSettings() {
 BuildTrayMenu()
 
 BuildTrayMenu() {
-    global Settings, ModelCatalog, ReasoningCatalog, PromptPath, LogPath
+    global Settings, ModelCatalog, ReasoningCatalog, PromptPath, LogDir
     tray := A_TrayMenu
     tray.Delete()
     tray.Add("LangHelper", (*) => 0)
@@ -152,7 +177,8 @@ BuildTrayMenu() {
     tray.Add("Open prompt.md",   (*) => Run('"' PromptPath '"'))
     tray.Add("Show last result", (*) => ShowLastResult())
     tray.Add("Search history...", (*) => ShowHistoryWindow())
-    tray.Add("Open log file",    (*) => Run('"' LogPath '"'))
+    tray.Add("Open log file",    (*) => Run('"' CurrentLogPath() '"'))
+    tray.Add("Open log folder",  (*) => Run('"' LogDir '"'))
     tray.Add("Dry-run on clipboard (preview prompt)", (*) => DryRunOnClipboard())
     tray.Add()
     tray.Add("Reload script", (*) => Reload())
@@ -168,12 +194,19 @@ PsArg(value) {
     return '"' StrReplace(value, '"', '`"') '"'
 }
 
+; The log is the first thing users paste when asking for help, so the account
+; identifiers and the prompt path must not survive into it. The rest of the
+; command line stays readable because it is what makes the log worth reading.
+RedactArgs(line) {
+    return RegExReplace(line, 'i)(-(?:Endpoint|EntraSubscription|EntraTenant|PromptFile))\s+"[^"]*"', '$1 "***"')
+}
+
 RunHistoryCommand(args, outPath := "") {
     global HistoryPsPath
     tmpErr := A_Temp "\langhelper_history_err.txt"
     try FileDelete tmpErr
     cmdLine := 'cmd.exe /c powershell.exe -NoProfile -ExecutionPolicy Bypass -File ' PsArg(HistoryPsPath) ' ' args ' 1>nul 2> "' tmpErr '"'
-    Log("History command: " cmdLine)
+    Log("History command: " RedactArgs(cmdLine))
     exitCode := RunWait(cmdLine, , "Hide")
     err := FileExist(tmpErr) ? Trim(FileRead(tmpErr, "UTF-8"), " `t`r`n") : ""
     if (exitCode != 0)
@@ -547,10 +580,14 @@ ShowLastResult() {
 }
 
 ChooseModel(item, *) {
-    global Settings
+    global Settings, TranslatorWindows
     Settings["Model"] := item
     SaveSettings()
     BuildTrayMenu()
+    ; Every open window translates with its own dropdown and writes that value
+    ; back, so any window left stale would silently undo this choice.
+    for win in TranslatorWindows
+        try win.setModel.Call(item)
     TrayTip("LangHelper", "Model set to " item, 0x1)
 }
 
@@ -570,6 +607,19 @@ OpenSettings() {
 
 ; --- Single active translator window -----------------------------------------
 ActiveTranslator := ""
+
+; Every open window, not just the reuse target: with SingleWindow=0 there can be
+; several, and all of them need to follow a tray model change.
+TranslatorWindows := []
+
+UnregisterTranslator(g) {
+    global TranslatorWindows
+    Loop TranslatorWindows.Length
+        if (TranslatorWindows[A_Index].gui = g) {
+            TranslatorWindows.RemoveAt(A_Index)
+            return
+        }
+}
 
 ; --- Double-Ctrl+C trigger ---------------------------------------------------
 LastCopyTick := 0
@@ -618,52 +668,64 @@ TriggerTranslation(dryRun) {
 ; --- Backend call (AHK -> PowerShell -> chat completions API) ---------------
 CallBackend(text, features, model, dryRun) {
     global PsPath, Settings
-    tmpIn  := A_Temp "\langhelper_in.txt"
-    tmpOut := A_Temp "\langhelper_out.txt"
-    tmpErr := A_Temp "\langhelper_err.txt"
+    ; Unique per call: another window can start a translation while this one sits
+    ; in RunWait, and shared names would let the two clobber each other's files.
+    static callSeq := 0
+    callSeq += 1
+    tmpBase := A_Temp "\langhelper_" A_TickCount "_" callSeq
+    tmpIn  := tmpBase "_in.txt"
+    tmpOut := tmpBase "_out.txt"
+    tmpErr := tmpBase "_err.txt"
+    ; A_TickCount restarts at boot, so a file left behind by a crash can collide
+    ; with a later name. Both this write and the redirect below append.
     for f in [tmpIn, tmpOut, tmpErr]
         try FileDelete f
-    FileAppend(text, tmpIn, "UTF-8")
-
-    psArgs := '-NoProfile -ExecutionPolicy Bypass -File "' PsPath '"'
-        . ' -Features "' features '"'
-        . ' -Model "'    model    '"'
-        . ' -InputFile "'  tmpIn  '"'
-        . ' -OutputFile "' tmpOut '"'
-    if (Trim(Settings["Endpoint"]) != "")
-        psArgs .= ' -Endpoint ' PsArg(Trim(Settings["Endpoint"]))
-    if (Trim(Settings["EntraSubscription"]) != "")
-        psArgs .= ' -EntraSubscription ' PsArg(Trim(Settings["EntraSubscription"]))
-    else if (Trim(Settings["EntraTenant"]) != "")
-        psArgs .= ' -EntraTenant ' PsArg(Trim(Settings["EntraTenant"]))
-    ; Non-reasoning deployments reject the field, so only send it when set.
-    if (Trim(Settings["ReasoningEffort"]) != "")
-        psArgs .= ' -ReasoningEffort "' Trim(Settings["ReasoningEffort"]) '"'
-    if (Trim(Settings["PromptFile"]) != "")
-        psArgs .= ' -PromptFile ' PsArg(Settings["PromptFile"])
-    if (dryRun)
-        psArgs .= ' -DryRun'
-
-    cmdLine := 'cmd.exe /c powershell.exe ' psArgs ' 1>> "' tmpErr '" 2>&1'
-    Log("Running: " cmdLine)
-    exitCode := -1
     try {
-        exitCode := RunWait(cmdLine, , "Hide")
-    } catch as e {
-        return { error: "RunWait failed: " e.Message, output: "", exit: -1 }
+        FileAppend(text, tmpIn, "UTF-8")
+
+        psArgs := '-NoProfile -ExecutionPolicy Bypass -File "' PsPath '"'
+            . ' -Features "' features '"'
+            . ' -Model "'    model    '"'
+            . ' -InputFile "'  tmpIn  '"'
+            . ' -OutputFile "' tmpOut '"'
+        if (Trim(Settings["Endpoint"]) != "")
+            psArgs .= ' -Endpoint ' PsArg(Trim(Settings["Endpoint"]))
+        if (Trim(Settings["EntraSubscription"]) != "")
+            psArgs .= ' -EntraSubscription ' PsArg(Trim(Settings["EntraSubscription"]))
+        else if (Trim(Settings["EntraTenant"]) != "")
+            psArgs .= ' -EntraTenant ' PsArg(Trim(Settings["EntraTenant"]))
+        ; Non-reasoning deployments reject the field, so only send it when set.
+        if (Trim(Settings["ReasoningEffort"]) != "")
+            psArgs .= ' -ReasoningEffort "' Trim(Settings["ReasoningEffort"]) '"'
+        if (Trim(Settings["PromptFile"]) != "")
+            psArgs .= ' -PromptFile ' PsArg(Settings["PromptFile"])
+        if (dryRun)
+            psArgs .= ' -DryRun'
+
+        cmdLine := 'cmd.exe /c powershell.exe ' psArgs ' 1>> "' tmpErr '" 2>&1'
+        Log("Running: " RedactArgs(cmdLine))
+        exitCode := -1
+        try {
+            exitCode := RunWait(cmdLine, , "Hide")
+        } catch as e {
+            return { error: "RunWait failed: " e.Message, output: "", exit: -1 }
+        }
+
+        out := FileExist(tmpOut) ? FileRead(tmpOut, "UTF-8") : ""
+        err := FileExist(tmpErr) ? FileRead(tmpErr, "UTF-8") : ""
+
+        out := RTrim(out, " `t`r`n")
+        err := Trim(err, " `t`r`n")
+
+        if (exitCode != 0 && out = "")
+            return { error: (err != "" ? err : "PowerShell exited with code " exitCode), output: "", exit: exitCode }
+        if (out = "" && err != "")
+            return { error: err, output: "", exit: exitCode }
+        return { error: "", output: out, exit: exitCode }
+    } finally {
+        for f in [tmpIn, tmpOut, tmpErr]
+            try FileDelete f
     }
-
-    out := FileExist(tmpOut) ? FileRead(tmpOut, "UTF-8") : ""
-    err := FileExist(tmpErr) ? FileRead(tmpErr, "UTF-8") : ""
-
-    out := RTrim(out, " `t`r`n")
-    err := Trim(err, " `t`r`n")
-
-    if (exitCode != 0 && out = "")
-        return { error: (err != "" ? err : "PowerShell exited with code " exitCode), output: "", exit: exitCode }
-    if (out = "" && err != "")
-        return { error: err, output: "", exit: exitCode }
-    return { error: "", output: out, exit: exitCode }
 }
 
 ; --- Combined translator window (source + features + result, live) ----------
@@ -750,7 +812,7 @@ IsModularPromptFile(path) {
 }
 
 ShowTranslatorWindow(sourceText, autoRun) {
-    global FeatureCatalog, ModelCatalog, Settings, LastResultPath, ActiveTranslator
+    global FeatureCatalog, ModelCatalog, Settings, LastResultPath, ActiveTranslator, TranslatorWindows
 
     ; Reuse the existing window when Single-window mode is on and one is open.
     if (Settings["SingleWindow"] != "0" && IsObject(ActiveTranslator)) {
@@ -1021,7 +1083,9 @@ ShowTranslatorWindow(sourceText, autoRun) {
             A_Clipboard      := ToCRLF(result.output)
         }
         try FileDelete LastResultPath
-        FileAppend(result.output, LastResultPath, "UTF-8")
+        ; Best-effort cache: a locked-down or missing LOCALAPPDATA must not take
+        ; the translation down with it.
+        try FileAppend(result.output, LastResultPath, "UTF-8")
         if (saveHistChk.Value)
             SetTimer(() => RecordHistory(textToTranslate, result.output, feat, modl), -10)
         elapsed := (A_TickCount - startTick) / 1000
@@ -1061,7 +1125,7 @@ ShowTranslatorWindow(sourceText, autoRun) {
         ; Turning single-window on makes this window the reuse target;
         ; turning it off stops future triggers from reusing it.
         if (singleWinChk.Value)
-            ActiveTranslator := { gui: g, update: UpdateWindow }
+            ActiveTranslator := winRef
         else if (IsObject(ActiveTranslator) && ActiveTranslator.gui = g)
             ActiveTranslator := ""
     }
@@ -1203,16 +1267,27 @@ ShowTranslatorWindow(sourceText, autoRun) {
 
     DestroyWindow(*) {
         global ActiveTranslator
+        UnregisterTranslator(g)
         if (IsObject(ActiveTranslator) && ActiveTranslator.gui = g)
             ActiveTranslator := ""
         g.Destroy()
+    }
+
+    SyncModelChoice(name) {
+        Loop ModelCatalog.Length
+            if (ModelCatalog[A_Index] = name) {
+                ddModel.Value := A_Index
+                return
+            }
     }
 
     closeBtn.OnEvent("Click", DestroyWindow)
     g.OnEvent("Escape", DestroyWindow)
     g.OnEvent("Close",  DestroyWindow)
 
-    ActiveTranslator := { gui: g, update: UpdateWindow }
+    winRef := { gui: g, update: UpdateWindow, setModel: SyncModelChoice }
+    TranslatorWindows.Push(winRef)
+    ActiveTranslator := winRef
 
     g.Show("w900 h700 Center")
     Layout()

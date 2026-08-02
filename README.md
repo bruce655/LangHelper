@@ -69,7 +69,8 @@ langhelper.ahk  ──reads clipboard──►  opens translator window
 | [langhelper.ini.example](langhelper.ini.example) | Tracked template for `langhelper.ini`. Copy it and fill in your own endpoint and Entra ids. |
 | `langhelper.ini` | Your local settings (endpoint, features, model, and the options in [Settings](#settings-langhelperini)). Git-ignored so subscription and tenant ids never leave your machine. |
 | `langhelper_history.sqlite` | Auto-created. Local searchable history database. |
-| `langhelper.log` | Auto-created. Timestamped log of every trigger and backend call. |
+| `logs/langhelper_YYYYMM.log` | Auto-created. Timestamped log of every trigger and backend call, one file per month. Endpoint, Entra ids, and the prompt-file path are masked, and the profile path is collapsed to `%USERPROFILE%`. |
+| `%LOCALAPPDATA%\LangHelper\` | Auto-created. Holds `last-result.txt` (tray *Show last result*) and the DPAPI-encrypted `entra-token.dat`. |
 
 ## AutoHotkey 介紹
 
@@ -398,7 +399,8 @@ Change anytime via tray → **Model ▸** or the dropdown in the translator wind
 - **Search history...** — opens a SQLite-backed searchable history of completed
    translations. Double-click a row to inspect it, copy the result, or re-run the
    original source text.
-- **Open log file** — opens `langhelper.log`.
+- **Open log file** — opens this month's `logs/langhelper_YYYYMM.log`.
+- **Open log folder** — opens `logs/`.
 - **Dry-run on clipboard (preview prompt)** — assembles the full prompt and
   shows it in a window *without* calling the model. Great when iterating on
   [prompt.md](prompt.md).
@@ -457,7 +459,7 @@ blocks by scanning the markdown.
 | Ctrl+C, Ctrl+C does nothing, but tray → **Dry-run** works | Another app is eating the second Ctrl+C. Edit [langhelper.ahk](langhelper.ahk): change `~^c::` to e.g. `~^!c::` (Ctrl+Alt+C) and reload. |
 | Empty / garbled CJK output | Confirm [prompt.md](prompt.md) is saved as UTF-8 (no BOM). |
 | "Could not find Core block" | Don't rename the `## Core` heading or remove its fenced code block in [prompt.md](prompt.md). |
-| Need to see what happened | Tray → **Open log file**. Every trigger, command line, exit code, and output length is logged. |
+| Need to see what happened | Tray → **Open log file**. Every trigger, command line, exit code, and output length is logged. The endpoint, Entra ids, and prompt-file path are masked, and the profile path is collapsed to `%USERPROFILE%`, so neither your account nor your user name appears. |
 
 ## Build history (what we did)
 
@@ -558,12 +560,47 @@ blocks by scanning the markdown.
     splits on spaces and eats backslashes, by passing a quoted forward-slash
     path — history was silently broken for any user whose profile path contains
     a space.
+22. **Stopped logging the endpoint and Entra ids** — the log recorded the whole
+    command line, so the values that step 20 removed from version control were
+    written back to disk on every translation. `-Endpoint`,
+    `-EntraSubscription`, `-EntraTenant`, and `-PromptFile` are now masked; the
+    log is the first thing anyone pastes when asking for help.
+23. **Moved logs into `logs/` with one file per month** — a single
+    `langhelper.log` grew without bound (286 KB before this change) and had no
+    rotation. The path is resolved on every write, so a long-running instance
+    rolls over at the month boundary on its own.
+24. **Synced the tray model menu with every open window** — a window translates
+    with its own dropdown and writes that back to the ini, so choosing a model
+    from the tray while a window was open silently reverted on the next run.
+    `SingleWindow=0` allows several windows at once, so all of them are tracked
+    and updated rather than just the most recent.
+25. **Escaped `%` and `_` in history search** — they were passed straight into
+    `LIKE`, so searching for `100%` matched far more than it should. Not a
+    security issue (`Quote-Sql` already handles quoting), just wrong results.
+26. **Added AutoHotkey syntax validation to CI** — only the release workflow
+    compiled the script, so a syntax error in the largest file in the
+    repository surfaced at tag time instead of on the pull request.
+27. **Gave every backend call its own scratch files** — `CallBackend` used fixed
+    names in `%TEMP%`, but AutoHotkey dispatches timer threads while `RunWait`
+    is blocked (measured: a timer fired 312 ms into a 2.1 s wait). With
+    `SingleWindow=0` each window carries its own `state.running` guard, so two
+    translations could overlap and read each other's output file. Names now
+    carry a tick and a counter, and a `finally` block removes them.
+28. **Moved `last-result.txt` to `%LOCALAPPDATA%\LangHelper`** — it is meant to
+    survive between runs, but `%TEMP%` is exactly what Storage Sense clears. The
+    scratch files stay in `%TEMP%`, which is where transient IPC belongs.
+29. **Collapsed the profile path in the log** — masking the endpoint and Entra
+    ids was not enough to make a log safe to paste: the scratch and cache paths
+    sit under `%USERPROFILE%`, so every line still carried the Windows user
+    name. The prefix is now replaced rather than removed, which keeps the paths
+    readable for debugging. It happens inside `Log()` rather than at each call
+    site, so error text relayed from PowerShell is covered too.
 
 ## Publishing a release (maintainers)
 
 Pull requests and pushes to `main` run the CI workflow, which validates
-PowerShell syntax, prompt assembly, and synchronization between prompt feature
-blocks and the AutoHotkey feature catalog.
+PowerShell syntax, AutoHotkey syntax, prompt assembly, and synchronization
+between prompt feature blocks and the AutoHotkey feature catalog.
 
 To publish, create and push a semantic-version tag from a tested `main` commit:
 

@@ -105,8 +105,9 @@ switch ($Action) {
         $safeLimit = [Math]::Max(1, [Math]::Min($Limit, 500))
         $where = ''
         if (-not [string]::IsNullOrWhiteSpace($Query)) {
-            $like = Quote-Sql ('%' + $Query + '%')
-            $where = "WHERE source LIKE $like OR result LIKE $like"
+            # Users type literal text, so % and _ must not act as LIKE wildcards.
+            $like = Quote-Sql ('%' + ($Query -replace '([\\%_])', '\$1') + '%')
+            $where = "WHERE source LIKE $like ESCAPE '\' OR result LIKE $like ESCAPE '\'"
         }
         $separator = [char]31
         $sql = @"

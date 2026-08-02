@@ -593,7 +593,8 @@ blocks by scanning the markdown.
     ids was not enough to make a log safe to paste: the scratch and cache paths
     sit under `%USERPROFILE%`, so every line still carried the Windows user
     name. The prefix is now replaced rather than removed, which keeps the paths
-    readable for debugging.
+    readable for debugging. It happens inside `Log()` rather than at each call
+    site, so error text relayed from PowerShell is covered too.
 
 ## Publishing a release (maintainers)
 

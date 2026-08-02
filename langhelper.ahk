@@ -36,7 +36,13 @@ CurrentLogPath() {
     return LogDir "\langhelper_" FormatTime(, "yyyyMM") ".log"
 }
 
+; The profile prefix is collapsed here rather than at each call site, because
+; any line can carry a scratch or cache path -- including error text relayed
+; from PowerShell.
 Log(msg) {
+    static UserProfile := EnvGet("USERPROFILE")
+    if (UserProfile != "")
+        msg := StrReplace(msg, UserProfile, "%USERPROFILE%")
     line := FormatTime(, "yyyy-MM-dd HH:mm:ss") "  " msg "`r`n"
     try FileAppend(line, CurrentLogPath(), "UTF-8")
 }
@@ -188,14 +194,11 @@ PsArg(value) {
     return '"' StrReplace(value, '"', '`"') '"'
 }
 
-; The log is the first thing users paste when asking for help. Account
-; identifiers and the prompt path are masked outright; the rest of the command
-; line stays readable because it is what makes the log worth reading, but the
-; profile prefix is collapsed so the user name does not ride along in it.
+; The log is the first thing users paste when asking for help, so the account
+; identifiers and the prompt path must not survive into it. The rest of the
+; command line stays readable because it is what makes the log worth reading.
 RedactArgs(line) {
-    static UserProfile := EnvGet("USERPROFILE")
-    line := RegExReplace(line, 'i)(-(?:Endpoint|EntraSubscription|EntraTenant|PromptFile))\s+"[^"]*"', '$1 "***"')
-    return UserProfile != "" ? StrReplace(line, UserProfile, "%USERPROFILE%") : line
+    return RegExReplace(line, 'i)(-(?:Endpoint|EntraSubscription|EntraTenant|PromptFile))\s+"[^"]*"', '$1 "***"')
 }
 
 RunHistoryCommand(args, outPath := "") {
@@ -203,7 +206,7 @@ RunHistoryCommand(args, outPath := "") {
     tmpErr := A_Temp "\langhelper_history_err.txt"
     try FileDelete tmpErr
     cmdLine := 'cmd.exe /c powershell.exe -NoProfile -ExecutionPolicy Bypass -File ' PsArg(HistoryPsPath) ' ' args ' 1>nul 2> "' tmpErr '"'
-    Log("History command: " cmdLine)
+    Log("History command: " RedactArgs(cmdLine))
     exitCode := RunWait(cmdLine, , "Hide")
     err := FileExist(tmpErr) ? Trim(FileRead(tmpErr, "UTF-8"), " `t`r`n") : ""
     if (exitCode != 0)

@@ -1,4 +1,5 @@
 # Runtime artifacts
+logs/
 langhelper.log
 langhelper_history.sqlite
 

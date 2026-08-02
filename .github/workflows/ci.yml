@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # Keep in sync with .github/workflows/release.yml.
+  AUTOHOTKEY_VERSION: '2.0.26'
+  AUTOHOTKEY_SHA256: '43522AA3122A57784AC5DB30ABF85C2244475C36ACD7796E2C993355F9E926AE'
+
 jobs:
   validate:
     runs-on: windows-latest
@@ -37,6 +42,43 @@ jobs:
             }
           }
           if ($failed) { throw 'PowerShell syntax validation failed.' }
+
+      - name: Validate AutoHotkey syntax
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tools = Join-Path $env:RUNNER_TEMP 'ahk'
+          New-Item -ItemType Directory -Path $tools -Force | Out-Null
+
+          gh release download "v$env:AUTOHOTKEY_VERSION" `
+            --repo AutoHotkey/AutoHotkey `
+            --pattern "AutoHotkey_$env:AUTOHOTKEY_VERSION.zip" `
+            --dir $tools
+
+          $archive = Join-Path $tools "AutoHotkey_$env:AUTOHOTKEY_VERSION.zip"
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $env:AUTOHOTKEY_SHA256) {
+            throw 'AutoHotkey archive checksum mismatch.'
+          }
+          Expand-Archive $archive (Join-Path $tools 'bin') -Force
+
+          $exe = Get-ChildItem (Join-Path $tools 'bin') -Filter 'AutoHotkey64.exe' -Recurse |
+            Select-Object -First 1
+          if (-not $exe) { throw 'AutoHotkey64.exe was not found.' }
+
+          # /ErrorStdOut keeps a syntax error from opening a dialog that would
+          # hang the runner; AutoHotkey is a GUI app so it needs Start-Process.
+          $out = Join-Path $env:RUNNER_TEMP 'ahk-validate-out.txt'
+          $err = Join-Path $env:RUNNER_TEMP 'ahk-validate-err.txt'
+          $process = Start-Process -FilePath $exe.FullName -ArgumentList @(
+            '/ErrorStdOut', '/validate', (Resolve-Path ./langhelper.ahk).Path
+          ) -Wait -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
+          foreach ($file in @($out, $err)) {
+            if (Test-Path $file) { Get-Content $file | Write-Host }
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "AutoHotkey syntax validation failed with exit code $($process.ExitCode)."
+          }
 
       - name: Test prompt assembly
         shell: pwsh

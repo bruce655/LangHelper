@@ -459,7 +459,7 @@ blocks by scanning the markdown.
 | Ctrl+C, Ctrl+C does nothing, but tray → **Dry-run** works | Another app is eating the second Ctrl+C. Edit [langhelper.ahk](langhelper.ahk): change `~^c::` to e.g. `~^!c::` (Ctrl+Alt+C) and reload. |
 | Empty / garbled CJK output | Confirm [prompt.md](prompt.md) is saved as UTF-8 (no BOM). |
 | "Could not find Core block" | Don't rename the `## Core` heading or remove its fenced code block in [prompt.md](prompt.md). |
-| Need to see what happened | Tray → **Open log file**. Every trigger, command line, exit code, and output length is logged; endpoint and Entra ids are masked so the log is safe to share. |
+| Need to see what happened | Tray → **Open log file**. Every trigger, command line, exit code, and output length is logged. The endpoint, Entra ids, and prompt-file path are masked; the script and temp paths are not, so they still show your user name. |
 
 ## Build history (what we did)
 

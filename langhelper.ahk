@@ -183,8 +183,9 @@ PsArg(value) {
     return '"' StrReplace(value, '"', '`"') '"'
 }
 
-; The log is the first thing users paste when asking for help, so the resource
-; ids and local prompt path must not survive into it.
+; The log is the first thing users paste when asking for help. Only the account
+; identifiers and the prompt path are masked; other local paths stay readable
+; because they are what makes the log useful.
 RedactArgs(line) {
     return RegExReplace(line, 'i)(-(?:Endpoint|EntraSubscription|EntraTenant|PromptFile))\s+"[^"]*"', '$1 "***"')
 }

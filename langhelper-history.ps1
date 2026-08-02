@@ -29,7 +29,7 @@ if (-not (Get-Command 'sqlite3' -ErrorAction SilentlyContinue)) {
     throw "sqlite3.exe not found. Install it with: winget install SQLite.SQLite"
 }
 
-function ConvertTo-SqlLiteral([AllowNull()][string]$Value) {
+function Quote-Sql([AllowNull()][string]$Value) {
     if ($null -eq $Value) { return "''" }
     return "'" + $Value.Replace("'", "''") + "'"
 }
@@ -91,7 +91,7 @@ switch ($Action) {
         $source = [System.IO.File]::ReadAllText($SourceFile, $utf8NoBom)
         $result = [System.IO.File]::ReadAllText($ResultFile, $utf8NoBom)
         $sql = "INSERT INTO history(model, features, source, result) VALUES ({0}, {1}, {2}, {3});" -f `
-            (ConvertTo-SqlLiteral $Model), (ConvertTo-SqlLiteral $Features), (ConvertTo-SqlLiteral $source), (ConvertTo-SqlLiteral $result)
+            (Quote-Sql $Model), (Quote-Sql $Features), (Quote-Sql $source), (Quote-Sql $result)
         Invoke-SqliteScript $sql | Out-Null
     }
 
@@ -105,9 +105,8 @@ switch ($Action) {
         $safeLimit = [Math]::Max(1, [Math]::Min($Limit, 500))
         $where = ''
         if (-not [string]::IsNullOrWhiteSpace($Query)) {
-            # Users type literal text, so % and _ must not act as LIKE wildcards.
-            $like = ConvertTo-SqlLiteral ('%' + ($Query -replace '([\\%_])', '\$1') + '%')
-            $where = "WHERE source LIKE $like ESCAPE '\' OR result LIKE $like ESCAPE '\'"
+            $like = Quote-Sql ('%' + $Query + '%')
+            $where = "WHERE source LIKE $like OR result LIKE $like"
         }
         $separator = [char]31
         $sql = @"

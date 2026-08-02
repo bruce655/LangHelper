@@ -16,11 +16,16 @@ HistoryDbPath := ScriptDir "\langhelper_history.sqlite"
 LogDir     := ScriptDir "\logs"
 
 ; Survives across runs, so it belongs beside the token cache rather than in
-; %TEMP%, which Storage Sense clears.
-LocalAppDir := EnvGet("LOCALAPPDATA") "\LangHelper"
-if !DirExist(LocalAppDir)
-    try DirCreate(LocalAppDir)
-LastResultPath := LocalAppDir "\last-result.txt"
+; %TEMP%, which Storage Sense clears. An unset LOCALAPPDATA would leave a
+; drive-relative "\LangHelper", so the cache is disabled instead of landing in
+; the drive root.
+LastResultPath := ""
+if (LocalAppData := EnvGet("LOCALAPPDATA")) {
+    LocalAppDir := LocalAppData "\LangHelper"
+    if !DirExist(LocalAppDir)
+        try DirCreate(LocalAppDir)
+    LastResultPath := LocalAppDir "\last-result.txt"
+}
 
 ; One file per month, resolved on every write so a long-running instance rolls
 ; over at the month boundary instead of growing without bound.

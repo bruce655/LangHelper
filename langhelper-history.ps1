@@ -10,6 +10,7 @@ param(
     [string]$Model = '',
     [string]$Features = '',
     [string]$Query = '',
+    [string]$QueryFile = '',
     [int]$Limit = 80,
     [int]$Id = 0,
     [string]$OutputFile,
@@ -37,10 +38,13 @@ function Invoke-SqliteScript([string]$Sql, [switch]$Capture) {
     $tmpSql = [System.IO.Path]::GetTempFileName()
     try {
         [System.IO.File]::WriteAllText($tmpSql, $Sql, $utf8NoBom)
+        # .read splits its argument on spaces and eats backslashes even when
+        # quoted, so hand it a quoted forward-slash path.
+        $readCmd = '.read "' + $tmpSql.Replace('\', '/') + '"'
         if ($Capture) {
-            $result = & sqlite3 $DbPath ".read $tmpSql"
+            $result = & sqlite3 $DbPath $readCmd
         } else {
-            & sqlite3 $DbPath ".read $tmpSql" | Out-Null
+            & sqlite3 $DbPath $readCmd | Out-Null
             $result = $null
         }
         if ($LASTEXITCODE -ne 0) { throw "sqlite3 failed with exit code $LASTEXITCODE" }
@@ -93,11 +97,17 @@ switch ($Action) {
 
     'Search' {
         if (-not $OutputFile) { throw 'OutputFile is required for Search.' }
+        # Search text is untrusted, so the caller passes it by file rather than
+        # as a command-line argument.
+        if ($QueryFile -and (Test-Path -LiteralPath $QueryFile)) {
+            $Query = [System.IO.File]::ReadAllText($QueryFile, $utf8NoBom)
+        }
         $safeLimit = [Math]::Max(1, [Math]::Min($Limit, 500))
         $where = ''
         if (-not [string]::IsNullOrWhiteSpace($Query)) {
-            $like = Quote-Sql ('%' + $Query + '%')
-            $where = "WHERE source LIKE $like OR result LIKE $like"
+            # Users type literal text, so % and _ must not act as LIKE wildcards.
+            $like = Quote-Sql ('%' + ($Query -replace '([\\%_])', '\$1') + '%')
+            $where = "WHERE source LIKE $like ESCAPE '\' OR result LIKE $like ESCAPE '\'"
         }
         $separator = [char]31
         $sql = @"

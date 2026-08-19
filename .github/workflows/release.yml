@@ -12,12 +12,6 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  AUTOHOTKEY_VERSION: '2.0.26'
-  AUTOHOTKEY_SHA256: '43522AA3122A57784AC5DB30ABF85C2244475C36ACD7796E2C993355F9E926AE'
-  AHK2EXE_VERSION: '1.1.37.02a2'
-  AHK2EXE_SHA256: 'C29B8C3A5124850D79FC9E66E2CA79677C377D7F31631AD3022BA159C5D9E3BE'
-
 jobs:
   release:
     runs-on: windows-latest
@@ -64,56 +58,8 @@ jobs:
             throw 'Prompt assembly smoke test failed.'
           }
 
-      - name: Download pinned AutoHotkey build tools
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $tools = Join-Path $env:RUNNER_TEMP 'langhelper-tools'
-          New-Item -ItemType Directory -Path $tools -Force | Out-Null
-
-          gh release download "v$env:AUTOHOTKEY_VERSION" `
-            --repo AutoHotkey/AutoHotkey `
-            --pattern "AutoHotkey_$env:AUTOHOTKEY_VERSION.zip" `
-            --dir $tools
-          gh release download "Ahk2Exe$env:AHK2EXE_VERSION" `
-            --repo AutoHotkey/Ahk2Exe `
-            --pattern "Ahk2Exe$env:AHK2EXE_VERSION.zip" `
-            --dir $tools
-
-          $ahkArchive = Join-Path $tools "AutoHotkey_$env:AUTOHOTKEY_VERSION.zip"
-          $compilerArchive = Join-Path $tools "Ahk2Exe$env:AHK2EXE_VERSION.zip"
-          if ((Get-FileHash $ahkArchive -Algorithm SHA256).Hash -ne $env:AUTOHOTKEY_SHA256) {
-            throw 'AutoHotkey archive checksum mismatch.'
-          }
-          if ((Get-FileHash $compilerArchive -Algorithm SHA256).Hash -ne $env:AHK2EXE_SHA256) {
-            throw 'Ahk2Exe archive checksum mismatch.'
-          }
-
-          Expand-Archive $ahkArchive (Join-Path $tools 'autohotkey') -Force
-          Expand-Archive $compilerArchive (Join-Path $tools 'compiler') -Force
-          "LANGHELPER_TOOLS=$tools" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Compile application
-        shell: pwsh
-        run: |
-          $base = Get-ChildItem (Join-Path $env:LANGHELPER_TOOLS 'autohotkey') `
-            -Filter 'AutoHotkey64.exe' -Recurse | Select-Object -First 1
-          $compiler = Get-ChildItem (Join-Path $env:LANGHELPER_TOOLS 'compiler') `
-            -Filter 'Ahk2Exe.exe' -Recurse | Select-Object -First 1
-          if (-not $base -or -not $compiler) { throw 'AutoHotkey build tools were not found.' }
-
-          $outDir = Join-Path $env:RUNNER_TEMP 'compiled'
-          New-Item -ItemType Directory -Path $outDir -Force | Out-Null
-          $process = Start-Process -FilePath $compiler.FullName -ArgumentList @(
-            '/in', (Resolve-Path ./langhelper.ahk).Path,
-            '/out', "$outDir/LangHelper.exe",
-            '/base', $base.FullName
-          ) -Wait -PassThru
-          if ($process.ExitCode -ne 0 -or -not (Test-Path "$outDir/LangHelper.exe")) {
-            throw "Ahk2Exe compilation failed with exit code $($process.ExitCode)."
-          }
-          "LANGHELPER_EXE=$outDir/LangHelper.exe" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          node --check ./vscode-extension/extension.js
+          if ($LASTEXITCODE -ne 0) { throw 'extension.js failed the syntax check.' }
 
       - name: Package release
         id: package
@@ -124,15 +70,16 @@ jobs:
           $staging = Join-Path $env:RUNNER_TEMP $packageName
           New-Item -ItemType Directory -Path $staging -Force | Out-Null
 
-          Copy-Item $env:LANGHELPER_EXE (Join-Path $staging 'LangHelper.exe')
           @(
-            'langhelper.ahk',
+            'LangHelper.cmd',
+            'langhelper-tray.ps1',
             'langhelper.ps1',
-            'langhelper-history.ps1',
+            'install.ps1',
             'langhelper.ini.example',
             'prompt.md',
             'README.md'
           ) | ForEach-Object { Copy-Item $_ $staging }
+          Copy-Item ./vscode-extension (Join-Path $staging 'vscode-extension') -Recurse
           [IO.File]::WriteAllText(
             (Join-Path $staging 'VERSION.txt'),
             "$tag`n${{ github.sha }}`n",

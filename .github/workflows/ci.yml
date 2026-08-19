@@ -8,11 +8,6 @@ on:
 permissions:
   contents: read
 
-env:
-  # Keep in sync with .github/workflows/release.yml.
-  AUTOHOTKEY_VERSION: '2.0.26'
-  AUTOHOTKEY_SHA256: '43522AA3122A57784AC5DB30ABF85C2244475C36ACD7796E2C993355F9E926AE'
-
 jobs:
   validate:
     runs-on: windows-latest
@@ -43,41 +38,18 @@ jobs:
           }
           if ($failed) { throw 'PowerShell syntax validation failed.' }
 
-      - name: Validate AutoHotkey syntax
+      - name: Validate VS Code bridge extension
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          $tools = Join-Path $env:RUNNER_TEMP 'ahk'
-          New-Item -ItemType Directory -Path $tools -Force | Out-Null
+          node --check ./vscode-extension/extension.js
+          if ($LASTEXITCODE -ne 0) { throw 'extension.js failed the syntax check.' }
 
-          gh release download "v$env:AUTOHOTKEY_VERSION" `
-            --repo AutoHotkey/AutoHotkey `
-            --pattern "AutoHotkey_$env:AUTOHOTKEY_VERSION.zip" `
-            --dir $tools
-
-          $archive = Join-Path $tools "AutoHotkey_$env:AUTOHOTKEY_VERSION.zip"
-          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $env:AUTOHOTKEY_SHA256) {
-            throw 'AutoHotkey archive checksum mismatch.'
+          $manifest = Get-Content ./vscode-extension/package.json -Raw | ConvertFrom-Json
+          foreach ($field in @('name', 'publisher', 'version', 'main', 'engines')) {
+            if (-not $manifest.$field) { throw "package.json is missing '$field'." }
           }
-          Expand-Archive $archive (Join-Path $tools 'bin') -Force
-
-          $exe = Get-ChildItem (Join-Path $tools 'bin') -Filter 'AutoHotkey64.exe' -Recurse |
-            Select-Object -First 1
-          if (-not $exe) { throw 'AutoHotkey64.exe was not found.' }
-
-          # /ErrorStdOut keeps a syntax error from opening a dialog that would
-          # hang the runner; AutoHotkey is a GUI app so it needs Start-Process.
-          $out = Join-Path $env:RUNNER_TEMP 'ahk-validate-out.txt'
-          $err = Join-Path $env:RUNNER_TEMP 'ahk-validate-err.txt'
-          $process = Start-Process -FilePath $exe.FullName -ArgumentList @(
-            '/ErrorStdOut', '/validate', (Resolve-Path ./langhelper.ahk).Path
-          ) -Wait -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
-          foreach ($file in @($out, $err)) {
-            if (Test-Path $file) { Get-Content $file | Write-Host }
-          }
-          if ($process.ExitCode -ne 0) {
-            throw "AutoHotkey syntax validation failed with exit code $($process.ExitCode)."
+          if (-not (Test-Path (Join-Path './vscode-extension' $manifest.main))) {
+            throw "package.json 'main' points at a missing file: $($manifest.main)"
           }
 
       - name: Test prompt assembly
@@ -107,22 +79,4 @@ jobs:
           }
           if ($assembled.Contains('{{PASTE_CLIPBOARD_HERE}}')) {
             throw 'Clipboard placeholder was not replaced.'
-          }
-
-      - name: Verify feature catalog matches prompt
-        shell: pwsh
-        run: |
-          $prompt = Get-Content ./prompt.md -Raw
-          $ahk = Get-Content ./langhelper.ahk -Raw
-          $promptFeatures = [regex]::Matches($prompt, '\[FEATURE:\s*([A-Z0-9_]+)\]') |
-            ForEach-Object { $_.Groups[1].Value } |
-            Sort-Object -Unique
-          $ahkFeatures = [regex]::Matches($ahk, '^\s*\["([A-Z0-9_]+)",', 'Multiline') |
-            ForEach-Object { $_.Groups[1].Value } |
-            Sort-Object -Unique
-
-          $difference = Compare-Object $promptFeatures $ahkFeatures
-          if ($difference) {
-            $difference | Format-Table | Out-String | Write-Host
-            throw 'FeatureCatalog and prompt.md feature blocks do not match.'
           }

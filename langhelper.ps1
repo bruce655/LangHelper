@@ -1,52 +1,31 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-    LangHelper backend: assembles the prompt from prompt.md and calls a
-    chat-completions API.
+    LangHelper backend: assembles the prompt from prompt.md and sends it to a
+    GitHub Copilot backend.
 
 .DESCRIPTION
     Reads prompt.md from the script directory, extracts the Core block and any
-    requested [FEATURE: ...] blocks, injects the clipboard text, then posts the
-    assembled prompt to the Azure AI Foundry /chat/completions endpoint and
-    writes the response.
+    requested [FEATURE: ...] blocks, injects the clipboard text, then sends the
+    assembled prompt to the selected provider and writes the response.
 
-    GitHub Models (`gh models run`) was retired on 2026-07-30 and is no longer
-    a supported backend.
+.PARAMETER Provider
+    Which backend answers the prompt:
+      auto        - vscode when the bridge is alive, else copilot-cli.
+      vscode      - the LangHelper Bridge extension inside a running VS Code,
+                    using the Copilot models your VS Code is already signed in to.
+                    Fastest and the cheapest against a Copilot subscription.
+      copilot-cli - `copilot -p`. Works with VS Code closed, but each call pays
+                    for the agent's own system prompt (tens of seconds, ~10 AI
+                    credits), so it is a fallback rather than a default.
 
 .PARAMETER Features
     Comma-separated feature names to enable (e.g. "POLISH,BILINGUAL_EN_ZHTW").
     Empty string means Core-only (translate to English).
 
 .PARAMETER Model
-    The *deployment name* you created in the portal, not the underlying model id.
-
-.PARAMETER Endpoint
-    Base URL of the Foundry resource. The standard /openai/v1/chat/completions
-    path is appended automatically when you supply only the resource root, so
-    both of these work:
-      https://my-res.openai.azure.com
-      https://my-res.services.ai.azure.com/openai/v1
-
-.PARAMETER EntraSubscription
-    Subscription id or name to acquire the Entra token from. Pin this when you
-    switch `az` accounts often, otherwise the token follows whatever `az account
-    set` last selected and the call fails with 401.
-
-    api-key auth is off on resources with disableLocalAuth=true, which Azure
-    Policy commonly enforces and re-applies on every write, so Entra ID is the
-    only path. Requires `az login` once, plus the "Cognitive Services OpenAI
-    User" role on the resource.
-
-.PARAMETER EntraTenant
-    Tenant id to acquire the Entra token from. Mutually exclusive with
-    -EntraSubscription in the Azure CLI, so it is only used when no subscription
-    is given. Prefer -EntraSubscription, which already implies its tenant.
-
-.PARAMETER ReasoningEffort
-    Optional reasoning_effort value for reasoning models (none / minimal / low /
-    medium / high). Empty means the field is omitted, which is what non-reasoning
-    deployments need. Translation rarely benefits from reasoning, so 'none'
-    keeps latency and output-token cost down on gpt-5.1+ deployments.
+    For vscode, a Copilot model family such as gpt-4o-mini. For copilot-cli, a
+    `copilot --model` value. Empty lets the provider choose.
 
 .PARAMETER PromptFile
     Optional path to an external prompt/spec file. If supplied and it exists,
@@ -73,13 +52,10 @@
 #>
 [CmdletBinding()]
 param(
+    [ValidateSet('auto', 'vscode', 'copilot-cli')]
+    [string]$Provider = "auto",
     [string]$Features = "",
-    [string]$Model = "gpt-5.4-mini",
-    [string]$Endpoint = "",
-    [string]$EntraSubscription = "",
-    [string]$EntraTenant = "",
-    [ValidateSet('', 'none', 'minimal', 'low', 'medium', 'high')]
-    [string]$ReasoningEffort = "",
+    [string]$Model = "",
     [string]$PromptFile = "",
     [Parameter(Mandatory)][string]$InputFile,
     [Parameter(Mandatory)][string]$OutputFile,
@@ -191,175 +167,166 @@ if ($DryRun) {
 }
 
 # --- Backend helpers -----------------------------------------------------------
-function Get-EntraAccessToken {
-    param(
-        [string]$Resource = 'https://cognitiveservices.azure.com',
-        [string]$Subscription = '',
-        [string]$Tenant = '',
-        [string]$CachePath = (Join-Path $env:LOCALAPPDATA 'LangHelper\entra-token.dat')
-    )
+function Get-BridgeRoot {
+    $base = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $env:USERPROFILE 'AppData\Local' }
+    return (Join-Path $base 'LangHelper\bridge')
+}
 
-    # Tokens are scoped, so a cached one is only reusable for the same target.
-    $scope = "$Resource|$Subscription|$Tenant"
+function Test-BridgeAlive {
+    param([Parameter(Mandatory)][string]$Root, [int]$MaxAgeSec = 90)
 
-    # Shelling out to az costs ~1s, which is very visible for a clipboard-speed
-    # tool, so reuse the token until it is nearly expired.
-    if (Test-Path -LiteralPath $CachePath) {
-        try {
-            $secure = ConvertTo-SecureString -String ([System.IO.File]::ReadAllText($CachePath)).Trim()
-            $bstr   = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-            try   { $cached = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) | ConvertFrom-Json }
-            finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
-            if ($cached.scope -eq $scope -and [datetime]$cached.expiresOn -gt (Get-Date).AddMinutes(5)) {
-                return [string]$cached.token
-            }
-        } catch { }
-    }
-
-    if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
-        throw "LangHelper needs the Azure CLI on PATH. Install it, then run:  az login"
-    }
-
-    $azArgs = @('account', 'get-access-token', '--resource', $Resource, '--output', 'json')
-    # The CLI rejects --tenant together with --subscription; a subscription already
-    # pins the tenant, so it wins.
-    if     ($Subscription) { $azArgs += @('--subscription', $Subscription) }
-    elseif ($Tenant)       { $azArgs += @('--tenant', $Tenant) }
-
-    $raw = & az @azArgs 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        $hint = if ($Tenant) { "az login --tenant $Tenant" } else { 'az login' }
-        throw "az account get-access-token failed. Run '$hint' and retry.`n$raw"
-    }
-
-    try { $tok = ($raw | Out-String) | ConvertFrom-Json }
-    catch { throw "Could not parse the az token response.`n$raw" }
-    if (-not $tok.accessToken) { throw "az returned no accessToken.`n$raw" }
-
-    $expiresOn = if ($tok.expires_on) {
-        [System.DateTimeOffset]::FromUnixTimeSeconds([long]$tok.expires_on).LocalDateTime
-    } else {
-        [datetime]$tok.expiresOn
-    }
-
+    $hb = Join-Path $Root 'heartbeat.json'
+    if (-not (Test-Path -LiteralPath $hb)) { return $false }
     try {
-        $dir = Split-Path -Parent $CachePath
-        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-        $payload = @{
-            token     = [string]$tok.accessToken
-            expiresOn = $expiresOn.ToString('o')
-            scope     = $scope
-        } | ConvertTo-Json -Compress
-        # DPAPI: readable only by this Windows user on this machine.
-        $blob = ConvertTo-SecureString -String $payload -AsPlainText -Force | ConvertFrom-SecureString
-        [System.IO.File]::WriteAllText($CachePath, $blob)
-    } catch { }
-
-    return [string]$tok.accessToken
+        $obj = [System.IO.File]::ReadAllText($hb) | ConvertFrom-Json
+        return ([datetime]$obj.updated).ToUniversalTime() -gt (Get-Date).ToUniversalTime().AddSeconds(-$MaxAgeSec)
+    } catch { return $false }
 }
 
-function Resolve-ChatCompletionsUrl {
-    param([Parameter(Mandatory)][string]$BaseUrl)
-
-    $u = $BaseUrl.Trim().TrimEnd('/')
-    if ($u -match '/chat/completions$') { return $u }
-    if ($u -notmatch '/v1$')            { $u = "$u/openai/v1" }
-    return "$u/chat/completions"
-}
-
-function Get-HttpErrorDetail {
-    param($ErrorRecord, [string]$Url)
-
-    $webResponse = $null
-    if ($ErrorRecord.Exception -is [System.Net.WebException]) {
-        $webResponse = $ErrorRecord.Exception.Response
-    }
-    if (-not $webResponse) { return "$($ErrorRecord.Exception.Message) ($Url)" }
-
-    $body = ''
-    try {
-        $reader = New-Object System.IO.StreamReader($webResponse.GetResponseStream())
-        $body = $reader.ReadToEnd()
-        $reader.Close()
-    } catch { }
-
-    $status = [int]$webResponse.StatusCode
-
-    # Azure's content filter / prompt shield rejects the request before the model
-    # sees it, sometimes with an empty body, which otherwise surfaces as a bare 400.
-    if ($status -eq 400 -and ($body -match 'content_filter|jailbreak|ResponsibleAI' -or -not $body.Trim())) {
-        return @(
-            "Azure content filter blocked this request (HTTP 400).",
-            "The clipboard text tripped a safety or prompt-injection rule, so the model never saw it.",
-            "Try again with different wording, or remove text that reads like an instruction to the assistant."
-        ) -join "`n"
-    }
-
-    return ("HTTP {0} from {1}`n{2}" -f $status, $Url, $body)
-}
-
-function Invoke-ChatCompletion {
+function Invoke-VSCodeBridge {
     param(
-        [Parameter(Mandatory)][string]$Url,
-        [Parameter(Mandatory)][string]$Model,
+        [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$SystemPrompt,
         [Parameter(Mandatory)][string]$UserPrompt,
-        [string]$AccessToken = '',
-        [string]$ReasoningEffort = '',
+        [string]$Model = '',
         [int]$TimeoutSec = 120
     )
 
-    $headers = @{}
-    if ($AccessToken) { $headers['Authorization'] = "Bearer $AccessToken" }
-
-    $payload = @{
-        model    = $Model
-        messages = @(
-            @{ role = 'system'; content = $SystemPrompt },
-            @{ role = 'user';   content = $UserPrompt }
-        )
+    $reqDir = Join-Path $Root 'requests'
+    $resDir = Join-Path $Root 'responses'
+    foreach ($d in @($reqDir, $resDir)) {
+        if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
     }
-    if ($ReasoningEffort) { $payload['reasoning_effort'] = $ReasoningEffort }
-    $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes(($payload | ConvertTo-Json -Depth 6 -Compress))
 
-    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+    if (-not (Test-BridgeAlive -Root $Root)) {
+        throw "The LangHelper Bridge is not responding. Start VS Code (with the LangHelper Bridge extension installed) or switch Provider to copilot-cli."
+    }
+
+    $id      = [guid]::NewGuid().ToString('n')
+    $resFile = Join-Path $resDir "$id.json"
+
+    # The stable VS Code language model API has no system role. Two separate user
+    # turns read as a stalled conversation and the model echoes the input, so the
+    # instructions and the clipboard go in one turn instead.
+    $combined = $SystemPrompt + "`n`n" + $UserPrompt
+    $payload = @{
+        id        = $id
+        model     = $Model
+        timeoutMs = $TimeoutSec * 1000
+        messages  = @(
+            @{ role = 'user'; content = $combined }
+        )
+    } | ConvertTo-Json -Depth 6 -Compress
+
+    # Write to a temp name first so the extension never reads a half-written file.
+    $tmp = Join-Path $reqDir "$id.json.tmp"
+    [System.IO.File]::WriteAllText($tmp, $payload, (New-Object System.Text.UTF8Encoding $false))
+    [System.IO.File]::Move($tmp, (Join-Path $reqDir "$id.json"))
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    try {
+        while ((Get-Date) -lt $deadline) {
+            if (Test-Path -LiteralPath $resFile) {
+                $raw = $null
+                for ($i = 0; $i -lt 20 -and -not $raw; $i++) {
+                    try { $raw = [System.IO.File]::ReadAllText($resFile) } catch { Start-Sleep -Milliseconds 50 }
+                }
+                $obj = $raw | ConvertFrom-Json
+                if (-not $obj.ok) { throw "LangHelper Bridge: $($obj.error)" }
+                return [string]$obj.content
+            }
+            Start-Sleep -Milliseconds 120
+        }
+    } finally {
+        Remove-Item -LiteralPath $resFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $reqDir "$id.json") -Force -ErrorAction SilentlyContinue
+    }
+    throw "The LangHelper Bridge did not answer within $TimeoutSec s."
+}
+
+function Invoke-CopilotCli {
+    param(
+        [Parameter(Mandatory)][string]$SystemPrompt,
+        [Parameter(Mandatory)][string]$UserPrompt,
+        [string]$Model = '',
+        [int]$TimeoutSec = 300
+    )
+
+    $copilot = Get-Command copilot -ErrorAction SilentlyContinue
+    if (-not $copilot) {
+        throw "The GitHub Copilot CLI is not on PATH. Install it with 'npm install -g @github/copilot', then run 'copilot' once to sign in."
+    }
+
+    $prompt = $SystemPrompt + "`n`n" + $UserPrompt
+    $work   = Join-Path ([System.IO.Path]::GetTempPath()) ("langhelper-cli-" + [guid]::NewGuid().ToString('n'))
+    New-Item -ItemType Directory -Path $work -Force | Out-Null
+    $stdout = Join-Path $work 'out.txt'
+    $stderr = Join-Path $work 'err.txt'
+
+    # The CLI is an agent, so tools, MCP servers and repo instructions are all
+    # turned off: LangHelper only needs one text completion.
+    $cliArgs = @(
+        '-p', $prompt,
+        '--no-color', '--log-level', 'none',
+        '--disable-builtin-mcps', '--no-custom-instructions', '--no-ask-user',
+        '--allow-all-tools'
+    )
+    if ($Model) { $cliArgs += @('--model', $Model) }
 
     try {
-        $resp = Invoke-WebRequest -Uri $Url -Method Post -Headers $headers `
-            -ContentType 'application/json' -Body $bodyBytes `
-            -TimeoutSec $TimeoutSec -UseBasicParsing
-    } catch {
-        throw (Get-HttpErrorDetail $_ $Url)
-    }
-
-    # PS 5.1 decodes JSON bodies as Latin-1 when the response omits charset,
-    # which mangles CJK. Decode the raw stream as UTF-8 instead.
-    $json = [System.Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray())
-    $obj  = $json | ConvertFrom-Json
-
-    if (-not $obj.choices -or $obj.choices.Count -lt 1) {
-        throw "Unexpected response from $Url`n$json"
-    }
-    $content = $obj.choices[0].message.content
-    if ($content -is [System.Array]) { $content = [string]::Join('', $content) }
-    if ([string]::IsNullOrWhiteSpace($content)) {
-        $reason = $obj.choices[0].finish_reason
-        if ($reason -eq 'content_filter') {
-            throw "Azure content filter blocked the model's reply. The translation was produced but withheld. Try rephrasing the clipboard text."
+        $proc = Start-Process -FilePath $copilot.Source -ArgumentList $cliArgs -WorkingDirectory $work `
+            -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+            try { $proc.Kill() } catch { }
+            throw "The Copilot CLI did not finish within $TimeoutSec s."
         }
-        throw "Model returned empty content. Finish reason: $reason"
+        $raw = if (Test-Path -LiteralPath $stdout) { [System.IO.File]::ReadAllText($stdout) } else { '' }
+        if ($proc.ExitCode -ne 0) {
+            $err = if (Test-Path -LiteralPath $stderr) { [System.IO.File]::ReadAllText($stderr) } else { '' }
+            throw "copilot exited with $($proc.ExitCode).`n$err`n$raw"
+        }
+    } finally {
+        Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
     }
-    return [string]$content
+
+    # Strip the CLI's trailing usage summary (Changes / AI Credits / Tokens / Resume).
+    $lines  = ($raw -replace "`r`n", "`n").Split("`n")
+    $cut    = $lines.Count
+    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+        if ($lines[$i] -match '^\s*(Changes|AI Credits|Tokens|Resume|Total duration|Session)\s') { $cut = $i }
+        elseif ($lines[$i].Trim()) { break }
+    }
+    $content = ($lines[0..([Math]::Max($cut - 1, 0))] -join "`n").Trim()
+    if (-not $content) { throw "The Copilot CLI returned no text.`n$raw" }
+    return $content
 }
 
 # --- Call the model ------------------------------------------------------------
-if (-not $Endpoint) {
-    throw "No endpoint configured. Set Endpoint in langhelper.ini (see README: Azure AI Foundry setup)."
-}
-$accessToken = Get-EntraAccessToken -Subscription $EntraSubscription -Tenant $EntraTenant
+$bridgeRoot = Get-BridgeRoot
 
-$url      = Resolve-ChatCompletionsUrl -BaseUrl $Endpoint
-$response = Invoke-ChatCompletion -Url $url -Model $Model -SystemPrompt $systemPrompt -UserPrompt $userPrompt `
-    -AccessToken $accessToken -ReasoningEffort $ReasoningEffort -TimeoutSec $TimeoutSec
+$chain = switch ($Provider) {
+    'vscode'      { @('vscode') }
+    'copilot-cli' { @('copilot-cli') }
+    default {
+        if (Test-BridgeAlive -Root $bridgeRoot) { @('vscode', 'copilot-cli') } else { @('copilot-cli', 'vscode') }
+    }
+}
+
+$response = $null
+$failures = New-Object System.Collections.Generic.List[string]
+foreach ($p in $chain) {
+    try {
+        $response = switch ($p) {
+            'vscode'      { Invoke-VSCodeBridge -Root $bridgeRoot -SystemPrompt $systemPrompt -UserPrompt $userPrompt -Model $Model -TimeoutSec $TimeoutSec }
+            'copilot-cli' { Invoke-CopilotCli -SystemPrompt $systemPrompt -UserPrompt $userPrompt -Model $Model -TimeoutSec ([Math]::Max($TimeoutSec, 300)) }
+        }
+        Write-Verbose "LangHelper answered via provider '$p'."
+        break
+    } catch {
+        $failures.Add("[$p] $($_.Exception.Message)")
+    }
+}
+
+if ($null -eq $response) { throw ($failures -join "`n`n") }
 
 [System.IO.File]::WriteAllText($OutputFile, $response, $utf8NoBom)

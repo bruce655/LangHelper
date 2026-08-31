@@ -137,15 +137,28 @@ if ($isModular) {
     # input and answer with a single line. Append an explicit reminder listing the
     # exact "## ..." sections the enabled features require, after the clipboard,
     # where models weight instructions most heavily.
-    if ($featureText) {
-        $headings = [regex]::Matches($featureText, '##[ \t]+[^\r\n]+') |
-            ForEach-Object { $_.Value.Trim() } |
-            Select-Object -Unique
-        if ($headings) {
-            $headingList = $headings -join ', '
-            $userPrompt = $userPrompt.TrimEnd() +
-                "`n`nREMINDER: Even if the clipboard text above is short, you MUST still output every required section, in order: $headingList. Do not answer with a single line, and do not skip or merge any section."
+    #
+    # A block can cross-reference another feature ("If [FEATURE: POLISH] is also
+    # enabled, add ## Polished (English)"). Those headings are conditional, so the
+    # reminder is built only from the spans whose governing feature is also
+    # selected - otherwise unticking POLISH still demands a Polished section.
+    $applicable = New-Object System.Collections.Generic.List[string]
+    foreach ($chunk in $featureChunks) {
+        # Each block opens with its own tag, so the split yields name/text pairs.
+        $parts = [regex]::Split($chunk, '\[FEATURE:\s*([A-Z0-9_]+)[^\]]*\]')
+        for ($i = 1; $i -lt $parts.Count; $i += 2) {
+            if ($selected -contains $parts[$i] -and ($i + 1) -lt $parts.Count) {
+                $applicable.Add($parts[$i + 1])
+            }
         }
+    }
+    $headings = [regex]::Matches(([string]::Join("`n", $applicable)), '##[ \t]+[^\r\n]+') |
+        ForEach-Object { $_.Value.Trim() } |
+        Select-Object -Unique
+    if ($headings) {
+        $headingList = $headings -join ', '
+        $userPrompt = $userPrompt.TrimEnd() +
+            "`n`nREMINDER: Even if the clipboard text above is short, you MUST still output every required section, in order: $headingList. Do not answer with a single line, and do not skip or merge any section. Do not add any other section."
     }
 }
 else {

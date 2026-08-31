@@ -283,11 +283,22 @@ $script:StatusLabel = $null
 $script:FeaturePanel = $null
 $script:CurrentSource = ''
 
+function Set-BoxText {
+    param([Parameter(Mandatory)]$Box, [string]$Text)
+    # A scrolled TextBox keeps painting the old, longer text behind the new one,
+    # so scroll back to the top and force a repaint instead of just assigning.
+    $Box.Text = $Text -replace "`r`n", "`n" -replace "`n", "`r`n"
+    $Box.SelectionStart = 0
+    $Box.SelectionLength = 0
+    $Box.ScrollToCaret()
+    $Box.Refresh()
+}
+
 function Set-Result {
     param([string]$Text, [string]$Status = '', [switch]$IsError)
     if (-not $script:Form -or $script:Form.IsDisposed) { return }
-    $script:ResultBox.Text = $Text -replace "`r`n", "`n" -replace "`n", "`r`n"
     $script:ResultBox.ForeColor = if ($IsError) { [Drawing.Color]::Firebrick } else { [Drawing.Color]::FromArgb(30, 30, 30) }
+    Set-BoxText -Box $script:ResultBox -Text $Text
     $script:StatusLabel.Text = $Status
 }
 
@@ -406,7 +417,7 @@ function Show-Translation {
 
     if (-not $script:Form -or $script:Form.IsDisposed) { [void](New-TranslatorWindow) }
     $script:CurrentSource = $Text
-    $script:SourceBox.Text = $Text -replace "`r`n", "`n" -replace "`n", "`r`n"
+    Set-BoxText -Box $script:SourceBox -Text $Text
     Set-Result -Text '' -Status 'Translating…'
     $script:Form.Show()
     $script:Form.WindowState = 'Normal'
@@ -503,7 +514,6 @@ $miLast.Add_Click({
         Set-Result -Text ([System.IO.File]::ReadAllText($f, $script:Utf8)) -Status 'Last result'
     }
 })
-
 $miHistory = $menu.Items.Add('Open history')
 $miHistory.Add_Click({
     $f = Join-Path $script:DataDir 'history.jsonl'

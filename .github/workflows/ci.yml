@@ -80,3 +80,29 @@ jobs:
           if ($assembled.Contains('{{PASTE_CLIPBOARD_HERE}}')) {
             throw 'Clipboard placeholder was not replaced.'
           }
+
+      - name: Reminder lists only the enabled features
+        shell: pwsh
+        run: |
+          $inputPath = Join-Path $env:RUNNER_TEMP 'reminder-input.txt'
+          $outputPath = Join-Path $env:RUNNER_TEMP 'reminder-output.txt'
+          [IO.File]::WriteAllText($inputPath, '測試', [Text.UTF8Encoding]::new($false))
+
+          # BILINGUAL_EN_ZHTW cross-references POLISH ("if POLISH is also enabled,
+          # add ## Polished (English)"). Those headings are conditional and must
+          # not reach the reminder unless POLISH is selected too.
+          ./langhelper.ps1 -Features 'BILINGUAL_EN_ZHTW' -InputFile $inputPath -OutputFile $outputPath -DryRun
+          $reminder = (([IO.File]::ReadAllText($outputPath)) -split 'REMINDER:')[-1]
+          if ($reminder -match 'Polished') {
+            Write-Host $reminder
+            throw 'Reminder demanded a Polished section while POLISH was disabled.'
+          }
+
+          ./langhelper.ps1 -Features 'POLISH,BILINGUAL_EN_ZHTW' -InputFile $inputPath -OutputFile $outputPath -DryRun
+          $reminder = (([IO.File]::ReadAllText($outputPath)) -split 'REMINDER:')[-1]
+          foreach ($heading in @('## Polished (English)', '## English', '## 繁體中文 (zh-TW)')) {
+            if (-not $reminder.Contains($heading)) {
+              Write-Host $reminder
+              throw "Reminder is missing a required section: $heading"
+            }
+          }

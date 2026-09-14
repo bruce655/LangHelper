@@ -79,6 +79,9 @@ DefaultModel := "gpt-5.4-mini"
 ; Endpoint:   Foundry resource URL, e.g. https://my-res.openai.azure.com
 ; EntraSubscription / EntraTenant: pin which az account the token comes from.
 ;             Subscription wins; the CLI rejects both at once.
+; AzureConfigDir: private AZURE_CONFIG_DIR for the az calls, so signing in or out
+;             in your own shell does not break LangHelper. Empty uses
+;             %LOCALAPPDATA%\LangHelper\azure, which needs its own az login.
 ; ReasoningEffort: none/minimal/low/medium/high for reasoning models; empty omits
 ;             the field.
 ; Model:      comma-separated deployment names. The first one is the active
@@ -89,6 +92,7 @@ Settings := Map(
     "Endpoint",          IniRead(IniPath, "LangHelper", "Endpoint",          ""),
     "EntraSubscription", IniRead(IniPath, "LangHelper", "EntraSubscription", ""),
     "EntraTenant",       IniRead(IniPath, "LangHelper", "EntraTenant",       ""),
+    "AzureConfigDir",    IniRead(IniPath, "LangHelper", "AzureConfigDir",    ""),
     "ReasoningEffort",   IniRead(IniPath, "LangHelper", "ReasoningEffort",   ""),
     "PromptFile",        IniRead(IniPath, "LangHelper", "PromptFile",        ""),
     "AutoTranslate",     IniRead(IniPath, "LangHelper", "AutoTranslate",     "0"),
@@ -138,6 +142,7 @@ SaveSettings() {
     IniWrite Settings["Endpoint"],       IniPath, "LangHelper", "Endpoint"
     IniWrite Settings["EntraSubscription"], IniPath, "LangHelper", "EntraSubscription"
     IniWrite Settings["EntraTenant"],     IniPath, "LangHelper", "EntraTenant"
+    IniWrite Settings["AzureConfigDir"],  IniPath, "LangHelper", "AzureConfigDir"
     IniWrite Settings["ReasoningEffort"], IniPath, "LangHelper", "ReasoningEffort"
     IniWrite Settings["PromptFile"],     IniPath, "LangHelper", "PromptFile"
     IniWrite Settings["AutoTranslate"],  IniPath, "LangHelper", "AutoTranslate"
@@ -198,7 +203,7 @@ PsArg(value) {
 ; identifiers and the prompt path must not survive into it. The rest of the
 ; command line stays readable because it is what makes the log worth reading.
 RedactArgs(line) {
-    return RegExReplace(line, 'i)(-(?:Endpoint|EntraSubscription|EntraTenant|PromptFile))\s+"[^"]*"', '$1 "***"')
+    return RegExReplace(line, 'i)(-(?:Endpoint|EntraSubscription|EntraTenant|AzureConfigDir|PromptFile))\s+"[^"]*"', '$1 "***"')
 }
 
 RunHistoryCommand(args, outPath := "") {
@@ -694,6 +699,8 @@ CallBackend(text, features, model, dryRun) {
             psArgs .= ' -EntraSubscription ' PsArg(Trim(Settings["EntraSubscription"]))
         else if (Trim(Settings["EntraTenant"]) != "")
             psArgs .= ' -EntraTenant ' PsArg(Trim(Settings["EntraTenant"]))
+        if (Trim(Settings["AzureConfigDir"]) != "")
+            psArgs .= ' -AzureConfigDir ' PsArg(Trim(Settings["AzureConfigDir"]))
         ; Non-reasoning deployments reject the field, so only send it when set.
         if (Trim(Settings["ReasoningEffort"]) != "")
             psArgs .= ' -ReasoningEffort "' Trim(Settings["ReasoningEffort"]) '"'

@@ -42,6 +42,13 @@
     -EntraSubscription in the Azure CLI, so it is only used when no subscription
     is given. Prefer -EntraSubscription, which already implies its tenant.
 
+.PARAMETER AzureConfigDir
+    Directory used as AZURE_CONFIG_DIR while shelling out to `az`, so LangHelper
+    keeps its own Azure CLI profile and an unrelated `az login`/`az logout` in
+    your normal shell cannot break translation ("Subscription ... not found").
+    Defaults to %LOCALAPPDATA%\LangHelper\azure; it needs its own one-off
+    `az login`. Point it at %USERPROFILE%\.azure to share the default profile.
+
 .PARAMETER ReasoningEffort
     Optional reasoning_effort value for reasoning models (none / minimal / low /
     medium / high). Empty means the field is omitted, which is what non-reasoning
@@ -78,6 +85,7 @@ param(
     [string]$Endpoint = "",
     [string]$EntraSubscription = "",
     [string]$EntraTenant = "",
+    [string]$AzureConfigDir = "",
     [ValidateSet('', 'none', 'minimal', 'low', 'medium', 'high')]
     [string]$ReasoningEffort = "",
     [string]$PromptFile = "",
@@ -196,11 +204,16 @@ function Get-EntraAccessToken {
         [string]$Resource = 'https://cognitiveservices.azure.com',
         [string]$Subscription = '',
         [string]$Tenant = '',
+        [string]$ConfigDir = '',
         [string]$CachePath = (Join-Path $env:LOCALAPPDATA 'LangHelper\entra-token.dat')
     )
 
+    # Own Azure CLI profile: an `az login`/`az logout` in the user's normal shell
+    # must not drop the subscription this tool is pinned to.
+    if (-not $ConfigDir) { $ConfigDir = Join-Path $env:LOCALAPPDATA 'LangHelper\azure' }
+
     # Tokens are scoped, so a cached one is only reusable for the same target.
-    $scope = "$Resource|$Subscription|$Tenant"
+    $scope = "$Resource|$Subscription|$Tenant|$ConfigDir"
 
     # Shelling out to az costs ~1s, which is very visible for a clipboard-speed
     # tool, so reuse the token until it is nearly expired.
@@ -226,10 +239,25 @@ function Get-EntraAccessToken {
     if     ($Subscription) { $azArgs += @('--subscription', $Subscription) }
     elseif ($Tenant)       { $azArgs += @('--tenant', $Tenant) }
 
-    $raw = & az @azArgs 2>&1
+    if (-not (Test-Path -LiteralPath $ConfigDir)) {
+        New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
+    }
+    # A fresh profile defaults to the WAM broker, whose refresh tokens are
+    # device-bound, so az could only ever mint the resource asked for at login.
+    $azConfigFile = Join-Path $ConfigDir 'config'
+    if (-not (Test-Path -LiteralPath $azConfigFile)) {
+        [System.IO.File]::WriteAllText($azConfigFile, "[core]`r`nenable_broker_on_windows = false`r`n")
+    }
+
+    $previousConfigDir = $env:AZURE_CONFIG_DIR
+    $env:AZURE_CONFIG_DIR = $ConfigDir
+    try     { $raw = & az @azArgs 2>&1 }
+    finally { $env:AZURE_CONFIG_DIR = $previousConfigDir }
+
     if ($LASTEXITCODE -ne 0) {
-        $hint = if ($Tenant) { "az login --tenant $Tenant" } else { 'az login' }
-        throw "az account get-access-token failed. Run '$hint' and retry.`n$raw"
+        $login = if ($Tenant) { "az login --tenant $Tenant" } else { 'az login' }
+        $hint  = "`$env:AZURE_CONFIG_DIR = '$ConfigDir'; $login"
+        throw "az account get-access-token failed. LangHelper uses its own Azure CLI profile in $ConfigDir. Sign in to it once with:`n$hint`n$raw"
     }
 
     try { $tok = ($raw | Out-String) | ConvertFrom-Json }
@@ -356,7 +384,7 @@ function Invoke-ChatCompletion {
 if (-not $Endpoint) {
     throw "No endpoint configured. Set Endpoint in langhelper.ini (see README: Azure AI Foundry setup)."
 }
-$accessToken = Get-EntraAccessToken -Subscription $EntraSubscription -Tenant $EntraTenant
+$accessToken = Get-EntraAccessToken -Subscription $EntraSubscription -Tenant $EntraTenant -ConfigDir $AzureConfigDir
 
 $url      = Resolve-ChatCompletionsUrl -BaseUrl $Endpoint
 $response = Invoke-ChatCompletion -Url $url -Model $Model -SystemPrompt $systemPrompt -UserPrompt $userPrompt `

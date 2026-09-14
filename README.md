@@ -268,6 +268,18 @@ switch subscriptions, otherwise the token follows whatever `az account set` last
 selected and the call fails with 401. Use `EntraTenant` instead when you have no
 subscription context; the CLI rejects both at once.
 
+LangHelper keeps its **own Azure CLI profile** in
+`%LOCALAPPDATA%\LangHelper\azure`, so an `az login` / `az logout` for other work
+cannot break it (`Subscription '…' not found`). Sign in to that profile once:
+
+```powershell
+$env:AZURE_CONFIG_DIR = "$env:LOCALAPPDATA\LangHelper\azure"
+az login --tenant <tenant-id>
+```
+
+Set `AzureConfigDir` in `langhelper.ini` to use a different directory, or point
+it at `%USERPROFILE%\.azure` to share your normal profile again.
+
 `ReasoningEffort=none` turns off reasoning on gpt-5.1+ deployments. Translation
 gains nothing from it, and reasoning tokens are billed at the output rate.
 
@@ -361,6 +373,7 @@ starts the app — only `Endpoint` has to be filled in before the first call.
 | `Endpoint` | URL or empty | *(empty)* | Foundry resource URL, e.g. `https://my-res.openai.azure.com`. The `/openai/v1/chat/completions` path is appended automatically. Required. |
 | `EntraSubscription` | subscription id/name or empty | *(empty)* | Which `az` account the Entra token comes from. Set it if you switch subscriptions. |
 | `EntraTenant` | tenant id or empty | *(empty)* | Alternative to `EntraSubscription` when there is no subscription context. The CLI rejects both at once, so `EntraSubscription` wins. |
+| `AzureConfigDir` | directory path or empty | *(empty)* | `AZURE_CONFIG_DIR` used for the `az` calls, so LangHelper has its own sign-in state. Empty = `%LOCALAPPDATA%\LangHelper\azure`, which needs its own one-off `az login`. Set it to `%USERPROFILE%\.azure` to share the default profile. |
 | `ReasoningEffort` | empty / `none` / `minimal` / `low` / `medium` / `high` | *(empty)* | Sent as `reasoning_effort`. Empty omits the field, which non-reasoning deployments require. `none` needs gpt-5.1 or later. |
 | `PromptFile` | file path or empty | *(empty)* | Points to an external prompt/spec (e.g. a `SKILL.md` / `TeamsPrompt.md`). When set and the file exists, LangHelper runs in raw/skill mode and **ignores `Features`**. Empty = bundled [prompt.md](prompt.md). |
 | `AutoTranslate` | `0` / `1` | `0` | Toggles the previously always-on live translation. `1` = re-translate automatically while you type (debounced ~700 ms). `0` = only translate on trigger (Ctrl+C, Ctrl+C) or **Re-translate**. Mirrors the **Auto-translate while typing** checkbox. |
@@ -450,7 +463,8 @@ blocks by scanning the markdown.
 | `Error: Unexpected "{"` when launching | Make sure AHK **v2** is installed (`winget install AutoHotkey.AutoHotkey`). The v1 interpreter can't parse this script. |
 | `unexpected response from the server: 410 Gone` | You are on an old build that still calls `gh models`. GitHub Models was [retired on 2026-07-30](https://github.blog/changelog/2026-07-30-github-models-is-now-retired/). Update and configure [Azure AI Foundry](#azure-ai-foundry-setup). |
 | `No endpoint configured` | Set `Endpoint=https://<your-resource>.openai.azure.com` in `langhelper.ini`. |
-| `az account get-access-token failed` | Run `az login`. If you have several accounts, set `EntraSubscription` in `langhelper.ini` to pin the right one. |
+| `az account get-access-token failed` | Sign in to LangHelper's own CLI profile: `$env:AZURE_CONFIG_DIR = "$env:LOCALAPPDATA\LangHelper\azure"; az login --tenant <tenant-id>`. If you have several accounts, set `EntraSubscription` in `langhelper.ini` to pin the right one. |
+| `ERROR: Subscription '…' not found` | The subscription is missing from the CLI profile LangHelper uses — usually because `az login` was run for another account. Log in again with `AZURE_CONFIG_DIR` set as above; that profile is separate from your day-to-day one. |
 | `HTTP 401` | The signed-in account lacks data-plane access. Assign it the **Cognitive Services OpenAI User** role on the resource and wait a few minutes. |
 | `HTTP 400 … reasoning_effort` | The deployment is not a reasoning model, or predates `none`. Set `ReasoningEffort` to empty (tray → **Reasoning ▸ (omit)**) or `minimal`. |
 | `HTTP 404 … DeploymentNotFound` | `Model` must be the **deployment name** from the portal, not the base model id. |

@@ -1,591 +1,608 @@
 #requires -Version 5.1
-<#
-.SYNOPSIS
-    LangHelper 2.0 tray app: a DeepL-style Ctrl+C, Ctrl+C clipboard translator.
-
-.DESCRIPTION
-    Replaces the AutoHotkey front end. Everything here is stock Windows
-    PowerShell + WinForms, so the only thing you install is nothing.
-
-    Double-copy detection uses the Win32 clipboard listener
-    (AddClipboardFormatListener) rather than a keyboard hook: two clipboard
-    updates inside DoubleCopyMs, with Ctrl still held, means "translate this".
-
-    The translation itself goes to langhelper.ps1, which prefers the LangHelper
-    Bridge extension in VS Code so the work is done by the Copilot models you
-    are already signed in to.
-
-.PARAMETER ConfigFile
-    Path to langhelper.ini. Defaults to langhelper.ini next to this script.
-
-.PARAMETER Translate
-    Translate the current clipboard immediately at startup instead of waiting
-    for a double copy.
-#>
 [CmdletBinding()]
 param(
-    [string]$ConfigFile = "",
-    [switch]$Translate
+    [string]$ConfigFile = '',
+    [switch]$Translate,
+    [switch]$TestMode
 )
 
 $ErrorActionPreference = 'Stop'
-
-# WinForms and the clipboard both require STA; relaunch rather than fail obscurely.
-if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
-    $self = $MyInvocation.MyCommand.Path
-    $relaunch = @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', $self)
-    if ($ConfigFile) { $relaunch += @('-ConfigFile', $ConfigFile) }
-    if ($Translate)  { $relaunch += '-Translate' }
-    Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $relaunch -WindowStyle Hidden
+if ($PSVersionTable.PSEdition -eq 'Core' -or [Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
+    $arguments = @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $PSCommandPath))
+    if ($ConfigFile) { $arguments += @('-ConfigFile', ('"{0}"' -f $ConfigFile)) }
+    if ($Translate) { $arguments += '-Translate' }
+    if ($TestMode) { throw 'UI tests must run in Windows PowerShell 5.1 with -STA.' }
+    Start-Process "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList $arguments
     return
 }
 
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 [Windows.Forms.Application]::EnableVisualStyles()
-
-$script:Root       = Split-Path -Parent $MyInvocation.MyCommand.Path
-$script:Backend    = Join-Path $script:Root 'langhelper.ps1'
-$script:PromptPath = Join-Path $script:Root 'prompt.md'
-$script:IniPath    = if ($ConfigFile) { $ConfigFile } else { Join-Path $script:Root 'langhelper.ini' }
-$localAppData      = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $env:USERPROFILE 'AppData\Local' }
-$script:DataDir    = Join-Path $localAppData 'LangHelper'
-$script:LogDir     = Join-Path $script:Root 'logs'
-$script:Utf8       = New-Object System.Text.UTF8Encoding $false
-
-foreach ($d in @($script:DataDir, $script:LogDir)) {
-    if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+$script:Root = $PSScriptRoot
+$script:Backend = Join-Path $script:Root 'langhelper.ps1'
+. (Join-Path $script:Root 'langhelper-common.ps1')
+$script:IniPath = if ($ConfigFile) { $ConfigFile } else { Join-Path $script:Root 'langhelper.ini' }
+try { $script:Config = Read-LangHelperConfig $script:IniPath }
+catch {
+    [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Invalid LangHelper settings') | Out-Null
+    throw
 }
-
-# One tray icon per user, otherwise two listeners fight over every double copy.
-$script:Mutex = New-Object System.Threading.Mutex($false, 'Local\LangHelper.Tray')
-if (-not $script:Mutex.WaitOne(0)) {
-    [Windows.Forms.MessageBox]::Show('LangHelper is already running (look for the green H in the tray).',
-        'LangHelper', 'OK', 'Information') | Out-Null
-    return
+$script:DataDir = Split-Path -Parent (Get-LangHelperBridgeRoot)
+$script:LogDir = Join-Path $script:Root 'logs'
+$script:Utf8 = New-Object Text.UTF8Encoding $false
+$script:Windows = New-Object System.Collections.Generic.List[object]
+$script:LastClipboardTick = [datetime]::MinValue
+$script:IgnoreClipboardUntil = [datetime]::MinValue
+foreach ($directory in @($script:DataDir, $script:LogDir)) {
+    [void][IO.Directory]::CreateDirectory($directory)
 }
-
-# --- Win32 clipboard listener --------------------------------------------------
-if (-not ('LangHelper.ClipboardWatcher' -as [type])) {
-    Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using System.Windows.Forms;
-
-namespace LangHelper {
-    public class ClipboardWatcher : NativeWindow, IDisposable {
-        private const int WM_CLIPBOARDUPDATE = 0x031D;
-        public event EventHandler ClipboardUpdate;
-
-        [DllImport("user32.dll", SetLastError = true)] private static extern bool AddClipboardFormatListener(IntPtr hwnd);
-        [DllImport("user32.dll", SetLastError = true)] private static extern bool RemoveClipboardFormatListener(IntPtr hwnd);
-        [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int vKey);
-
-        public ClipboardWatcher() {
-            CreateHandle(new CreateParams());
-            AddClipboardFormatListener(Handle);
-        }
-
-        public static bool IsCtrlDown() { return (GetAsyncKeyState(0x11) & 0x8000) != 0; }
-
-        protected override void WndProc(ref Message m) {
-            if (m.Msg == WM_CLIPBOARDUPDATE) {
-                var h = ClipboardUpdate;
-                if (h != null) h(this, EventArgs.Empty);
-            }
-            base.WndProc(ref m);
-        }
-
-        public void Dispose() {
-            RemoveClipboardFormatListener(Handle);
-            DestroyHandle();
-        }
-    }
-}
-'@
-}
-
-# --- Config --------------------------------------------------------------------
-$script:Defaults = [ordered]@{
-    Provider       = 'auto'
-    Model          = ''
-    Features       = 'POLISH,BILINGUAL_EN_ZHTW'
-    PromptFile     = ''
-    DoubleCopyMs   = '700'
-    MinChars       = '1'
-    MaxChars       = '8000'
-    TimeoutSec     = '120'
-    AutoCopyResult = '0'
-    AlwaysOnTop    = '1'
-}
-
-function Read-Config {
-    $cfg = [ordered]@{}
-    foreach ($k in $script:Defaults.Keys) { $cfg[$k] = $script:Defaults[$k] }
-    if (Test-Path -LiteralPath $script:IniPath) {
-        # ReadAllText honours the BOM, so the old UTF-16 ini files still load.
-        foreach ($line in ([System.IO.File]::ReadAllText($script:IniPath) -replace "`r`n", "`n").Split("`n")) {
-            $t = $line.Trim()
-            if (-not $t -or $t.StartsWith(';') -or $t.StartsWith('#') -or $t.StartsWith('[')) { continue }
-            $eq = $t.IndexOf('=')
-            if ($eq -lt 1) { continue }
-            $key = $t.Substring(0, $eq).Trim()
-            # Unknown keys are dropped so ini files from older versions clean themselves up on save.
-            if ($cfg.Contains($key)) { $cfg[$key] = $t.Substring($eq + 1).Trim() }
-        }
-    }
-    return $cfg
-}
-
-function Save-Config {
-    param([Parameter(Mandatory)]$Config)
-    $sb = New-Object System.Text.StringBuilder
-    [void]$sb.AppendLine('[LangHelper]')
-    foreach ($k in $Config.Keys) { [void]$sb.AppendLine("$k=$($Config[$k])") }
-    [System.IO.File]::WriteAllText($script:IniPath, $sb.ToString(), $script:Utf8)
-}
-
-$script:Config = Read-Config
 
 function Write-Log {
     param([string]$Message)
-    try {
-        $file = Join-Path $script:LogDir ("langhelper_{0}.log" -f (Get-Date -Format 'yyyyMM'))
-        $safe = $Message -replace [regex]::Escape($env:USERPROFILE), '%USERPROFILE%'
-        Add-Content -LiteralPath $file -Value ("{0} {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $safe) -Encoding UTF8
-    } catch { }
+    $path = Join-Path $script:LogDir ("langhelper_{0}.log" -f (Get-Date -Format 'yyyyMM'))
+    $safe = $Message -replace [regex]::Escape($env:USERPROFILE), '%USERPROFILE%'
+    Add-Content -LiteralPath $path -Encoding UTF8 -Value ("{0} {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $safe)
 }
 
-function Add-History {
-    param([string]$Source, [string]$Result, [string]$Features)
-    try {
-        $row = @{
-            at       = (Get-Date).ToString('o')
-            features = $Features
-            provider = $script:Config.Provider
-            source   = $Source
-            result   = $Result
-        } | ConvertTo-Json -Depth 4 -Compress
-        Add-Content -LiteralPath (Join-Path $script:DataDir 'history.jsonl') -Value $row -Encoding UTF8
-    } catch { }
+function Save-Config {
+    Save-LangHelperConfig $script:Config $script:IniPath (Join-Path $script:Root 'langhelper.ini.example')
 }
 
-function Get-PromptFeatures {
-    $path = if ($script:Config.PromptFile -and (Test-Path -LiteralPath $script:Config.PromptFile)) {
-        $script:Config.PromptFile
-    } else { $script:PromptPath }
-    if (-not (Test-Path -LiteralPath $path)) { return @() }
-    $md = [System.IO.File]::ReadAllText($path)
-    $names = [regex]::Matches($md, '\[FEATURE:\s*([A-Z0-9_]+)') |
-        ForEach-Object { $_.Groups[1].Value } |
-        Select-Object -Unique
-    return @($names)
+function Set-BoxText {
+    param($Box, [string]$Text)
+    $Box.Text = $Text -replace "\r?\n", "`r`n"
+    $Box.Select(0, 0)
+    $Box.ScrollToCaret()
 }
 
-function Get-SelectedFeatures {
-    return @($script:Config.Features.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-}
-
-# --- Backend call (runs off the UI thread) -------------------------------------
-$script:Job = $null
-
-function Stop-Translation {
-    if ($script:Job) {
-        try { $script:Job.Shell.Stop() } catch { }
-        try { $script:Job.Shell.Dispose() } catch { }
-        $script:Job = $null
-    }
-}
-
-function Start-Translation {
-    param([Parameter(Mandatory)][string]$Text)
-
-    Stop-Translation
-    $id      = [guid]::NewGuid().ToString('n')
-    $inFile  = Join-Path $script:DataDir "req-$id.txt"
-    $outFile = Join-Path $script:DataDir "res-$id.txt"
-    [System.IO.File]::WriteAllText($inFile, $Text, $script:Utf8)
-
-    $promptFile = if ($script:Config.PromptFile) { $script:Config.PromptFile } else { $script:PromptPath }
-    $params = @{
-        Provider   = $script:Config.Provider
-        Features   = ((Get-SelectedFeatures) -join ',')
-        InputFile  = $inFile
-        OutputFile = $outFile
-        TimeoutSec = [int]$script:Config.TimeoutSec
-        PromptFile = $promptFile
-    }
-    if ($script:Config.Model) { $params['Model'] = $script:Config.Model }
-
-    $shell = [powershell]::Create()
-    [void]$shell.AddCommand($script:Backend).AddParameters($params)
-    $script:Job = [pscustomobject]@{
-        Shell    = $shell
-        Handle   = $shell.BeginInvoke()
-        OutFile  = $outFile
-        InFile   = $inFile
-        Started  = Get-Date
-        Features = $params.Features
-        Source   = $Text
-    }
-    Write-Log ("translate: {0} chars, features=[{1}], provider={2}" -f $Text.Length, $params.Features, $params.Provider)
-}
-
-function Complete-Translation {
-    if (-not $script:Job -or -not $script:Job.Handle.IsCompleted) { return }
-
-    $job = $script:Job
-    $script:Job = $null
-    $err = $null
-    $text = $null
-    try {
-        [void]$job.Shell.EndInvoke($job.Handle)
-        if ($job.Shell.Streams.Error.Count -gt 0) {
-            $err = ($job.Shell.Streams.Error | ForEach-Object { $_.ToString() }) -join "`n"
-        } elseif (Test-Path -LiteralPath $job.OutFile) {
-            $text = [System.IO.File]::ReadAllText($job.OutFile, $script:Utf8)
-        } else {
-            $err = 'The backend produced no output file.'
-        }
-    } catch {
-        $err = $_.Exception.Message
-    } finally {
-        try { $job.Shell.Dispose() } catch { }
-        Remove-Item -LiteralPath $job.InFile, $job.OutFile -Force -ErrorAction SilentlyContinue
-    }
-
-    $elapsed = [int]((Get-Date) - $job.Started).TotalMilliseconds
-    if ($err) {
-        Write-Log "failed after ${elapsed}ms: $err"
-        Set-Result -Text $err -Status ("Failed after {0:n1} s" -f ($elapsed / 1000)) -IsError
-        return
-    }
-
-    Write-Log "ok after ${elapsed}ms, $($text.Length) chars"
-    Add-History -Source $job.Source -Result $text -Features $job.Features
-    try { [System.IO.File]::WriteAllText((Join-Path $script:DataDir 'last-result.txt'), $text, $script:Utf8) } catch { }
-    Set-Result -Text $text -Status ("Done in {0:n1} s" -f ($elapsed / 1000))
-    if ($script:Config.AutoCopyResult -eq '1') { Set-ClipboardQuietly $text }
+function Set-Status {
+    param($Window, [string]$Text, [switch]$ErrorStatus)
+    $Window.Status.Text = $Text
+    $Window.Status.ForeColor = if ($ErrorStatus) { [Drawing.Color]::Firebrick } else { [Drawing.Color]::DarkSlateGray }
 }
 
 function Set-ClipboardQuietly {
     param([string]$Text)
-    # Our own copy would otherwise look like the first half of a double copy.
     $script:IgnoreClipboardUntil = (Get-Date).AddMilliseconds(1500)
-    try { [Windows.Forms.Clipboard]::SetText($Text) } catch { }
+    [Windows.Forms.Clipboard]::SetText($Text)
 }
-
-# --- Translator window ---------------------------------------------------------
-$script:Form = $null
-$script:ResultBox = $null
-$script:SourceBox = $null
-$script:StatusLabel = $null
-$script:FeaturePanel = $null
-$script:CurrentSource = ''
-
-function Set-BoxText {
-    param([Parameter(Mandatory)]$Box, [string]$Text)
-    # A scrolled TextBox keeps painting the old, longer text behind the new one,
-    # so scroll back to the top and force a repaint instead of just assigning.
-    $Box.Text = $Text -replace "`r`n", "`n" -replace "`n", "`r`n"
-    $Box.SelectionStart = 0
-    $Box.SelectionLength = 0
-    $Box.ScrollToCaret()
-    $Box.Refresh()
-}
-
-function Set-Result {
-    param([string]$Text, [string]$Status = '', [switch]$IsError)
-    if (-not $script:Form -or $script:Form.IsDisposed) { return }
-    $script:ResultBox.ForeColor = if ($IsError) { [Drawing.Color]::Firebrick } else { [Drawing.Color]::FromArgb(30, 30, 30) }
-    Set-BoxText -Box $script:ResultBox -Text $Text
-    $script:StatusLabel.Text = $Status
-}
-
-function New-TranslatorWindow {
-    $form = New-Object Windows.Forms.Form
-    $form.Text = 'LangHelper'
-    $form.Size = New-Object Drawing.Size(820, 620)
-    $form.MinimumSize = New-Object Drawing.Size(520, 360)
-    $form.StartPosition = 'CenterScreen'
-    $form.TopMost = ($script:Config.AlwaysOnTop -eq '1')
-    $form.Font = New-Object Drawing.Font('Segoe UI', 9.75)
-
-    $table = New-Object Windows.Forms.TableLayoutPanel
-    $table.Dock = 'Fill'
-    $table.ColumnCount = 1
-    $table.RowCount = 4
-    $table.Padding = New-Object Windows.Forms.Padding(10)
-    [void]$table.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::Absolute, 78)))
-    [void]$table.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::Absolute, 74)))
-    [void]$table.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::Percent, 100)))
-    [void]$table.RowStyles.Add((New-Object Windows.Forms.RowStyle([Windows.Forms.SizeType]::Absolute, 40)))
-
-    $src = New-Object Windows.Forms.TextBox
-    $src.Multiline = $true
-    $src.ReadOnly = $true
-    $src.ScrollBars = 'Vertical'
-    $src.Dock = 'Fill'
-    $src.BackColor = [Drawing.Color]::FromArgb(246, 246, 246)
-    $table.Controls.Add($src, 0, 0)
-
-    $features = New-Object Windows.Forms.FlowLayoutPanel
-    $features.Dock = 'Fill'
-    $features.AutoScroll = $true
-    $features.WrapContents = $true
-    $selected = Get-SelectedFeatures
-    foreach ($name in Get-PromptFeatures) {
-        $cb = New-Object Windows.Forms.CheckBox
-        $cb.Text = $name
-        $cb.AutoSize = $true
-        $cb.Margin = New-Object Windows.Forms.Padding(4, 4, 12, 4)
-        $cb.Checked = ($selected -contains $name)
-        $cb.Add_CheckedChanged({ Invoke-FeatureChange })
-        [void]$features.Controls.Add($cb)
-    }
-    $table.Controls.Add($features, 0, 1)
-
-    $result = New-Object Windows.Forms.TextBox
-    $result.Multiline = $true
-    $result.ReadOnly = $true
-    $result.ScrollBars = 'Vertical'
-    $result.Dock = 'Fill'
-    $result.BackColor = [Drawing.Color]::White
-    $result.Font = New-Object Drawing.Font('Segoe UI', 11)
-    $table.Controls.Add($result, 0, 2)
-
-    $bottom = New-Object Windows.Forms.FlowLayoutPanel
-    $bottom.Dock = 'Fill'
-    $bottom.FlowDirection = 'LeftToRight'
-
-    $copy = New-Object Windows.Forms.Button
-    $copy.Text = 'Copy result'
-    $copy.AutoSize = $true
-    $copy.Add_Click({ Set-ClipboardQuietly $script:ResultBox.Text; $script:StatusLabel.Text = 'Copied to clipboard' })
-    [void]$bottom.Controls.Add($copy)
-
-    $again = New-Object Windows.Forms.Button
-    $again.Text = 'Re-translate'
-    $again.AutoSize = $true
-    $again.Add_Click({ Invoke-FeatureChange })
-    [void]$bottom.Controls.Add($again)
-
-    $status = New-Object Windows.Forms.Label
-    $status.AutoSize = $true
-    $status.Padding = New-Object Windows.Forms.Padding(12, 8, 0, 0)
-    $status.ForeColor = [Drawing.Color]::Gray
-    [void]$bottom.Controls.Add($status)
-
-    $table.Controls.Add($bottom, 0, 3)
-    $form.Controls.Add($table)
-
-    $form.Add_FormClosing({
-        param($s, $e)
-        # Keep the window warm; the tray icon is the real lifetime owner.
-        if ($e.CloseReason -eq [Windows.Forms.CloseReason]::UserClosing) {
-            $e.Cancel = $true
-            $s.Hide()
-        }
-    })
-    $form.Add_KeyDown({
-        param($s, $e)
-        if ($e.KeyCode -eq [Windows.Forms.Keys]::Escape) { $s.Hide() }
-    })
-    $form.KeyPreview = $true
-
-    $script:Form = $form
-    $script:SourceBox = $src
-    $script:ResultBox = $result
-    $script:StatusLabel = $status
-    $script:FeaturePanel = $features
-    return $form
-}
-
-function Invoke-FeatureChange {
-    if (-not $script:FeaturePanel) { return }
-    $checked = @($script:FeaturePanel.Controls | Where-Object { $_.Checked } | ForEach-Object { $_.Text })
-    $script:Config.Features = ($checked -join ',')
-    try { Save-Config $script:Config } catch { }
-    if ($script:CurrentSource) {
-        Set-Result -Text '' -Status 'Translating…'
-        Start-Translation -Text $script:CurrentSource
-    }
-}
-
-function Show-Translation {
-    param([Parameter(Mandatory)][string]$Text)
-
-    if (-not $script:Form -or $script:Form.IsDisposed) { [void](New-TranslatorWindow) }
-    $script:CurrentSource = $Text
-    Set-BoxText -Box $script:SourceBox -Text $Text
-    Set-Result -Text '' -Status 'Translating…'
-    $script:Form.Show()
-    $script:Form.WindowState = 'Normal'
-    [void]$script:Form.Activate()
-    Start-Translation -Text $Text
-}
-
-# --- Clipboard trigger ---------------------------------------------------------
-$script:LastClipboardTick = [datetime]::MinValue
-$script:IgnoreClipboardUntil = [datetime]::MinValue
 
 function Get-ClipboardTextSafely {
     for ($i = 0; $i -lt 8; $i++) {
         try {
             if ([Windows.Forms.Clipboard]::ContainsText()) { return [Windows.Forms.Clipboard]::GetText() }
             return ''
-        } catch { Start-Sleep -Milliseconds 40 }
+        } catch [Runtime.InteropServices.ExternalException] {
+            Start-Sleep -Milliseconds 40
+        }
     }
-    return ''
+    throw 'Clipboard is busy. Try copying again.'
+}
+
+function Stop-WindowJob {
+    param($Window, [string]$Property = 'Job')
+    $job = $Window.$Property
+    if (-not $job) { return }
+    $Window.$Property = $null
+    try {
+        $job.Shell.Stop()
+    } finally {
+        $job.Shell.Dispose()
+        foreach ($file in @($job.InputFile, $job.OutputFile)) {
+            if ($file -and (Test-Path -LiteralPath $file)) { Remove-Item -LiteralPath $file -Force }
+        }
+    }
+}
+
+function Start-ModelRefresh {
+    param($Window)
+    Stop-WindowJob $Window 'CatalogJob'
+    $provider = [string]$Window.Provider.SelectedItem
+    $Window.Model.Items.Clear()
+    if ($provider -eq 'copilot-cli') {
+        $Window.Model.DropDownStyle = 'DropDown'
+        $Window.Model.Text = $Window.CliModel
+        $Window.ModelHint.Text = 'CLI: enter a model ID; no verified CLI catalog is available.'
+        return
+    }
+    $Window.Model.DropDownStyle = 'DropDownList'
+    $Window.ModelHint.Text = 'Loading VS Code models...'
+    $shell = [powershell]::Create()
+    [void]$shell.AddScript({
+        param($common)
+        . $common
+        Invoke-LangHelperBridge -Payload @{ action = 'models' } -TimeoutSec 15
+    }).AddArgument((Join-Path $script:Root 'langhelper-common.ps1'))
+    $Window.CatalogJob = [pscustomobject]@{
+        Shell = $shell; Handle = $shell.BeginInvoke(); InputFile = ''; OutputFile = ''
+    }
+}
+
+function Complete-ModelRefresh {
+    param($Window)
+    $job = $Window.CatalogJob
+    if (-not $job -or -not $job.Handle.IsCompleted) { return }
+    $Window.CatalogJob = $null
+    try {
+        $data = @($job.Shell.EndInvoke($job.Handle))
+        if ($job.Shell.Streams.Error.Count) { throw ($job.Shell.Streams.Error | Out-String) }
+        if (-not $data.Count) { throw 'Bridge returned no model catalog. Reinstall the bridge and reload VS Code.' }
+        $Window.Models = @($data[-1].models)
+        if (-not $Window.Models.Count) { throw 'No Copilot models are available to this VS Code account.' }
+        [void]$Window.Model.Items.Add('(Provider default)')
+        $selected = -1
+        for ($i = 0; $i -lt $Window.Models.Count; $i++) {
+            $model = $Window.Models[$i]
+            [void]$Window.Model.Items.Add("$($model.name) [$($model.id)]")
+            if ($model.id -eq $Window.VSCodeModel -or $model.family -eq $Window.VSCodeModel) { $selected = $i + 1 }
+        }
+        if (-not $Window.VSCodeModel) { $selected = 0 }
+        $Window.Model.SelectedIndex = $selected
+        if ($selected -lt 0) {
+            $Window.ModelHint.Text = "Requested model unavailable: $($Window.VSCodeModel). Select a model."
+        } else {
+            $Window.ModelHint.Text = 'VS Code catalog (auto uses this list; CLI fallback is reported).'
+        }
+    } catch {
+        $Window.ModelHint.Text = $_.Exception.Message
+        Set-Status $Window 'Model lookup failed. Check the Bridge installation and reload VS Code.' -ErrorStatus
+        Write-Log "model lookup failed: $($_.Exception.Message)"
+    } finally {
+        $job.Shell.Dispose()
+    }
+}
+
+function Get-WindowModel {
+    param($Window)
+    if ($Window.Provider.SelectedItem -eq 'copilot-cli') {
+        $value = $Window.Model.Text.Trim()
+        if (-not $value) { throw 'Enter an explicit CLI model ID before translating.' }
+        $Window.CliModel = $value
+        return $value
+    }
+    if ($Window.Model.SelectedIndex -lt 0) { throw 'Select an available VS Code model, or refresh the model list.' }
+    if ($Window.Model.SelectedIndex -eq 0) { $Window.VSCodeModel = ''; return '' }
+    $model = $Window.Models[$Window.Model.SelectedIndex - 1]
+    $Window.VSCodeModel = $model.id
+    return [string]$model.id
+}
+
+function Start-Translation {
+    param($Window)
+    try {
+        $text = $Window.Source.Text.Trim()
+        if (-not $text) { throw 'Source is empty.' }
+        $model = Get-WindowModel $Window
+        Stop-WindowJob $Window
+        $id = [guid]::NewGuid().ToString('n')
+        $inputFile = Join-Path $script:DataDir "req-$id.txt"
+        $outputFile = Join-Path $script:DataDir "res-$id.txt"
+        [IO.File]::WriteAllText($inputFile, $text, $script:Utf8)
+        $parameters = @{
+            Provider = [string]$Window.Provider.SelectedItem
+            Model = $model
+            Features = if ($Window.PromptInfo.Modular) { $Window.Features } else { '' }
+            PromptFile = $Window.PromptFile
+            InputFile = $inputFile; OutputFile = $outputFile
+            TimeoutSec = [int]$Window.TimeoutSec; PassThru = $true
+        }
+        $shell = [powershell]::Create()
+        [void]$shell.AddCommand($script:Backend).AddParameters($parameters)
+        $Window.Job = [pscustomobject]@{
+            Shell = $shell; Handle = $shell.BeginInvoke()
+            InputFile = $inputFile; OutputFile = $outputFile
+            Watch = [Diagnostics.Stopwatch]::StartNew()
+            Source = $text; Features = $parameters.Features
+            RequestedModel = $model; RequestedProvider = $parameters.Provider
+        }
+        Set-BoxText $Window.Result ''
+        Set-BoxText $Window.Notes ''
+        Set-Status $Window "Translating via $($parameters.Provider)..."
+        Write-Log "translate: $($text.Length) chars, provider=$($parameters.Provider), model=$model"
+    } catch {
+        Set-Status $Window $_.Exception.Message -ErrorStatus
+        Write-Log "translation start failed: $($_.Exception.Message)"
+    }
+}
+
+function Complete-Translation {
+    param($Window)
+    $job = $Window.Job
+    if (-not $job) { return }
+    if (-not $job.Handle.IsCompleted) {
+        Set-Status $Window ("Translating via {0} - {1:n1} s" -f $job.RequestedProvider, $job.Watch.Elapsed.TotalSeconds)
+        return
+    }
+    $Window.Job = $null
+    try {
+        $responses = @($job.Shell.EndInvoke($job.Handle))
+        if ($job.Shell.Streams.Error.Count) { throw ($job.Shell.Streams.Error | Out-String) }
+        if (-not $responses.Count -or -not $responses[-1].Content) { throw 'Backend returned no translation metadata.' }
+        $response = $responses[-1]
+        $split = Split-LangHelperResult $response.Content
+        Set-BoxText $Window.Result $split.Main
+        Set-BoxText $Window.Notes $split.Notes
+        $modelLabel = $response.ModelId
+        if (-not $response.ModelVerified) { $modelLabel = "$modelLabel (requested; CLI model not verified)" }
+        $status = "Done in {0:n3} s | {1} | {2}" -f $job.Watch.Elapsed.TotalSeconds, $response.Provider, $modelLabel
+        if ($response.Fallback) { $status += ' | FALLBACK'; Write-Log ("fallback: " + ($response.Failures -join '; ')) }
+        Set-Status $Window $status
+        Write-Log $status
+        $row = @{
+            at = (Get-Date).ToString('o'); source = $job.Source; result = $response.Content
+            features = $job.Features; provider = $response.Provider; model = $response.ModelId
+            modelVerified = $response.ModelVerified; elapsedMs = $job.Watch.ElapsedMilliseconds
+        } | ConvertTo-Json -Depth 4 -Compress
+        Add-Content -LiteralPath (Join-Path $script:DataDir 'history.jsonl') -Value $row -Encoding UTF8
+        [IO.File]::WriteAllText((Join-Path $script:DataDir 'last-result.txt'), $response.Content, $script:Utf8)
+        if ($Window.AutoCopy -and $split.Main) { Set-ClipboardQuietly $split.Main }
+    } catch {
+        Set-Status $Window $_.Exception.Message -ErrorStatus
+        Write-Log "translation failed: $($_.Exception.Message)"
+    } finally {
+        $job.Shell.Dispose()
+        foreach ($file in @($job.InputFile, $job.OutputFile)) {
+            if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }
+        }
+    }
+}
+
+function Show-FeatureSettings {
+    param($Window)
+    if (-not $Window.PromptInfo.Modular) { return }
+    $dialog = New-Object Windows.Forms.Form
+    $dialog.Text = 'Configure features'
+    $dialog.Size = New-Object Drawing.Size(450, 440)
+    $dialog.StartPosition = 'CenterParent'
+    $list = New-Object Windows.Forms.CheckedListBox
+    $list.Dock = 'Fill'
+    $list.CheckOnClick = $true
+    foreach ($name in $Window.PromptInfo.Features) { [void]$list.Items.Add($name, ($Window.Features.Split(',') -contains $name)) }
+    $save = New-Object Windows.Forms.Button
+    $save.Text = 'Apply'
+    $save.Dock = 'Bottom'
+    $save.DialogResult = 'OK'
+    $dialog.Controls.Add($list)
+    $dialog.Controls.Add($save)
+    $dialog.AcceptButton = $save
+    try {
+        if ($dialog.ShowDialog($Window.Form) -eq 'OK') {
+            $Window.Features = @($list.CheckedItems) -join ','
+            $Window.FeatureLabel.Text = "Features: $($Window.Features)"
+        }
+    } finally { $dialog.Dispose() }
+}
+
+function New-TextArea {
+    param([bool]$ReadOnly)
+    $box = New-Object Windows.Forms.TextBox
+    $box.Multiline = $true
+    $box.ReadOnly = $ReadOnly
+    $box.ScrollBars = 'Vertical'
+    $box.Dock = 'Fill'
+    $box.BackColor = if ($ReadOnly) { [Drawing.Color]::WhiteSmoke } else { [Drawing.Color]::White }
+    return $box
+}
+
+function New-TranslatorWindow {
+    $prompt = $script:Config.PromptFile
+    if (-not $prompt) { $prompt = Join-Path $script:Root 'prompt.md' }
+    $info = Get-LangHelperPromptInfo $prompt
+    $form = New-Object Windows.Forms.Form
+    $form.Text = 'LangHelper'
+    $form.Size = New-Object Drawing.Size(960, 850)
+    $form.MinimumSize = New-Object Drawing.Size(820, 650)
+    $form.StartPosition = 'CenterScreen'
+    $form.TopMost = ($script:Config.AlwaysOnTop -eq '1')
+    $form.Font = New-Object Drawing.Font('Segoe UI', 10)
+    $form.KeyPreview = $true
+    $window = [pscustomobject]@{
+        Form = $form; Source = (New-TextArea $false); Snapshot = (New-TextArea $true)
+        Result = (New-TextArea $true); Notes = (New-TextArea $true)
+        Status = (New-Object Windows.Forms.Label)
+        Provider = (New-Object Windows.Forms.ComboBox); Model = (New-Object Windows.Forms.ComboBox)
+        ModelHint = (New-Object Windows.Forms.Label); FeatureLabel = (New-Object Windows.Forms.Label)
+        Models = @(); VSCodeModel = $script:Config.Model; CliModel = ''
+        Job = $null; CatalogJob = $null; PendingTranslate = $false
+        Features = $script:Config.Features; PromptFile = $prompt; PromptInfo = $info
+        TimeoutSec = $script:Config.TimeoutSec; AutoCopy = ($script:Config.AutoCopyResult -eq '1')
+    }
+    if ($script:Config.Provider -eq 'copilot-cli') { $window.CliModel = $script:Config.Model }
+    $form.Tag = $window
+    $table = New-Object Windows.Forms.TableLayoutPanel
+    $table.Dock = 'Fill'
+    $table.Padding = New-Object Windows.Forms.Padding(12)
+    $table.ColumnCount = 1
+    $table.RowCount = 13
+    foreach ($height in @(38, 34, 26, -26, 26, -12, 36, 40, 26, -30, 26, -32, 40)) {
+        $type = if ($height -lt 0) { [Windows.Forms.SizeType]::Percent } else { [Windows.Forms.SizeType]::Absolute }
+        [void]$table.RowStyles.Add((New-Object Windows.Forms.RowStyle($type, [math]::Abs($height))))
+    }
+    $controls = New-Object Windows.Forms.FlowLayoutPanel
+    $controls.Dock = 'Fill'
+    $window.Provider.DropDownStyle = 'DropDownList'
+    $window.Provider.Width = 130
+    $window.Provider.Items.AddRange(@('vscode', 'copilot-cli', 'auto'))
+    $window.Provider.SelectedItem = $script:Config.Provider
+    $window.Model.Width = 430
+    $refresh = New-Object Windows.Forms.Button
+    $refresh.Text = 'Refresh models'
+    $refresh.AutoSize = $true
+    foreach ($control in @($window.Provider, $window.Model, $refresh)) { [void]$controls.Controls.Add($control) }
+    $table.Controls.Add($controls, 0, 0)
+    $window.ModelHint.Dock = 'Fill'
+    $table.Controls.Add($window.ModelHint, 0, 1)
+    foreach ($entry in @(@(2, 'Source (editable)'), @(4, 'Original clipboard snapshot'), @(8, 'Translation (Copy result copies this)'), @(10, 'Notes / back-translation'))) {
+        $label = New-Object Windows.Forms.Label
+        $label.Text = $entry[1]; $label.Dock = 'Fill'
+        $table.Controls.Add($label, 0, $entry[0])
+    }
+    $table.Controls.Add($window.Source, 0, 3)
+    $table.Controls.Add($window.Snapshot, 0, 5)
+    $table.Controls.Add($window.Result, 0, 9)
+    $table.Controls.Add($window.Notes, 0, 11)
+    $featureRow = New-Object Windows.Forms.FlowLayoutPanel
+    $featureRow.Dock = 'Fill'
+    $configure = New-Object Windows.Forms.Button
+    $configure.Text = 'Configure features'
+    $configure.AutoSize = $true
+    $configure.Enabled = $info.Modular
+    $window.FeatureLabel.AutoSize = $true
+    $window.FeatureLabel.Text = if ($info.Modular) { "Features: $($window.Features)" } else {
+        [regex]::Unescape('\u4f7f\u7528\u5916\u90e8 prompt\uff0cFeatures \u4e0d\u9069\u7528')
+    }
+    [void]$featureRow.Controls.Add($configure)
+    [void]$featureRow.Controls.Add($window.FeatureLabel)
+    $table.Controls.Add($featureRow, 0, 6)
+    $window.Status.Dock = 'Fill'
+    $table.Controls.Add($window.Status, 0, 7)
+    $buttons = New-Object Windows.Forms.FlowLayoutPanel
+    $buttons.Dock = 'Fill'
+    $translateButton = New-Object Windows.Forms.Button
+    $translateButton.Text = '&Re-translate'; $translateButton.AutoSize = $true
+    $copy = New-Object Windows.Forms.Button
+    $copy.Text = '&Copy result'; $copy.AutoSize = $true
+    $defaults = New-Object Windows.Forms.Button
+    $defaults.Text = 'Save as defaults'; $defaults.AutoSize = $true
+    $close = New-Object Windows.Forms.Button
+    $close.Text = 'Close'; $close.AutoSize = $true
+    foreach ($button in @($translateButton, $copy, $defaults, $close)) { [void]$buttons.Controls.Add($button) }
+    $table.Controls.Add($buttons, 0, 12)
+    $form.Controls.Add($table)
+    $form.AcceptButton = $translateButton
+    $refresh.Add_Click({ param($s, $e) Start-ModelRefresh $s.FindForm().Tag })
+    $window.Provider.Add_SelectedIndexChanged({
+        param($s, $e)
+        $w = $s.FindForm().Tag
+        if ($w.Job) { Stop-WindowJob $w; Set-Status $w 'Provider changed; previous translation cancelled.' }
+        $w.PendingTranslate = $false
+        Start-ModelRefresh $w
+    })
+    $window.Model.Add_SelectedIndexChanged({
+        param($s, $e)
+        $w = $s.FindForm().Tag
+        if ($w.Provider.SelectedItem -ne 'copilot-cli' -and $s.SelectedIndex -ge 0) {
+            $w.VSCodeModel = if ($s.SelectedIndex -eq 0) { '' } else { $w.Models[$s.SelectedIndex - 1].id }
+        }
+    })
+    $translateButton.Add_Click({ param($s, $e) Start-Translation $s.FindForm().Tag })
+    $configure.Add_Click({ param($s, $e) Show-FeatureSettings $s.FindForm().Tag })
+    $copy.Add_Click({
+        param($s, $e)
+        $w = $s.FindForm().Tag
+        try {
+            if (-not $w.Result.Text) { throw 'No translation to copy.' }
+            Set-ClipboardQuietly $w.Result.Text
+            Set-Status $w 'Main translation copied.'
+        } catch { Set-Status $w $_.Exception.Message -ErrorStatus }
+    })
+    $defaults.Add_Click({
+        param($s, $e)
+        $w = $s.FindForm().Tag
+        try {
+            $script:Config.Model = Get-WindowModel $w
+            $script:Config.Provider = [string]$w.Provider.SelectedItem
+            $script:Config.Features = $w.Features
+            Save-Config
+            Set-Status $w 'Defaults saved for new windows.'
+        } catch { Set-Status $w $_.Exception.Message -ErrorStatus }
+    })
+    $close.Add_Click({ param($s, $e) $s.FindForm().Close() })
+    $form.Add_KeyDown({ param($s, $e) if ($e.KeyCode -eq 'Escape') { $s.Close() } })
+    $form.Add_FormClosed({
+        param($s, $e)
+        Stop-WindowJob $s.Tag
+        Stop-WindowJob $s.Tag 'CatalogJob'
+        [void]$script:Windows.Remove($s.Tag)
+    })
+    [void]$script:Windows.Add($window)
+    if (-not $TestMode) { Start-ModelRefresh $window }
+    return $window
+}
+
+function Show-Translation {
+    param([string]$Text, [switch]$NoTranslate)
+    $window = $null
+    if ($script:Config.SingleWindow -eq '1' -and $script:Windows.Count) { $window = $script:Windows[$script:Windows.Count - 1] }
+    if (-not $window) { $window = New-TranslatorWindow }
+    Stop-WindowJob $window
+    Set-BoxText $window.Source $Text
+    Set-BoxText $window.Snapshot $Text
+    Set-BoxText $window.Result ''
+    Set-BoxText $window.Notes ''
+    $window.Form.Show()
+    $window.Form.WindowState = 'Normal'
+    [void]$window.Form.Activate()
+    Set-Status $window 'Ready'
+    $window.PendingTranslate = -not $NoTranslate
+    if ($window.PendingTranslate -and -not $window.CatalogJob) {
+        $window.PendingTranslate = $false
+        Start-Translation $window
+    }
+    return $window
 }
 
 function Invoke-ClipboardTrigger {
-    $now = Get-Date
-    if ($now -lt $script:IgnoreClipboardUntil) { return }
-
-    $window = [int]$script:Config.DoubleCopyMs
-    $isDouble = ($now - $script:LastClipboardTick).TotalMilliseconds -le $window
-    $script:LastClipboardTick = $now
-    if (-not $isDouble) { return }
-
-    # A real Ctrl+C, Ctrl+C still has Ctrl down; apps that write the clipboard
-    # twice on their own do not, which keeps the trigger from firing by accident.
-    if (-not [LangHelper.ClipboardWatcher]::IsCtrlDown()) { return }
-    $script:LastClipboardTick = [datetime]::MinValue
-
-    $text = Get-ClipboardTextSafely
-    if (-not $text) { return }
-    $trimmed = $text.Trim()
-    if ($trimmed.Length -lt [int]$script:Config.MinChars) { return }
-    if ($trimmed.Length -gt [int]$script:Config.MaxChars) {
-        $trimmed = $trimmed.Substring(0, [int]$script:Config.MaxChars)
+    try {
+        $now = Get-Date
+        if ($now -lt $script:IgnoreClipboardUntil) { return }
+        $double = ($now - $script:LastClipboardTick).TotalMilliseconds -le [int]$script:Config.DoubleCopyMs
+        $script:LastClipboardTick = $now
+        if (-not $double -or -not [LangHelper.ClipboardWatcher]::IsCtrlDown()) { return }
+        $script:LastClipboardTick = [datetime]::MinValue
+        $text = (Get-ClipboardTextSafely).Trim()
+        if ($text.Length -lt [int]$script:Config.MinChars) { return }
+        $truncated = $text.Length -gt [int]$script:Config.MaxChars
+        if ($truncated) { $text = $text.Substring(0, [int]$script:Config.MaxChars) }
+        $w = Show-Translation $text
+        if ($truncated) { $w.ModelHint.Text += " | Input truncated to $($script:Config.MaxChars) chars."; Write-Log 'Clipboard input truncated.' }
+    } catch {
+        Write-Log "clipboard trigger failed: $($_.Exception.Message)"
+        [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'LangHelper') | Out-Null
     }
-    Show-Translation -Text $trimmed
 }
 
-# --- Tray ----------------------------------------------------------------------
+if ($TestMode) { return }
+
 function New-TrayIcon {
-    $bmp = New-Object Drawing.Bitmap 32, 32
-    $g = [Drawing.Graphics]::FromImage($bmp)
-    $g.SmoothingMode = [Drawing.Drawing2D.SmoothingMode]::AntiAlias
-    $g.Clear([Drawing.Color]::Transparent)
-    $g.FillEllipse((New-Object Drawing.SolidBrush ([Drawing.Color]::FromArgb(255, 30, 145, 90))), 0, 0, 31, 31)
-    $fmt = New-Object Drawing.StringFormat
-    $fmt.Alignment = 'Center'
-    $fmt.LineAlignment = 'Center'
-    $g.DrawString('H', (New-Object Drawing.Font('Segoe UI', 16, [Drawing.FontStyle]::Bold)),
-        [Drawing.Brushes]::White, (New-Object Drawing.RectangleF(0, 0, 32, 32)), $fmt)
-    $g.Dispose()
-    $icon = [Drawing.Icon]::FromHandle($bmp.GetHicon())
-    $bmp.Dispose()
-    return $icon
+    $bitmap = New-Object Drawing.Bitmap 32, 32
+    $graphics = [Drawing.Graphics]::FromImage($bitmap)
+    $brush = New-Object Drawing.SolidBrush ([Drawing.Color]::FromArgb(30, 145, 90))
+    $font = New-Object Drawing.Font('Segoe UI', 16, [Drawing.FontStyle]::Bold)
+    $format = New-Object Drawing.StringFormat
+    $format.Alignment = 'Center'
+    $format.LineAlignment = 'Center'
+    try {
+        $graphics.Clear([Drawing.Color]::Transparent)
+        $graphics.FillEllipse($brush, 0, 0, 31, 31)
+        $graphics.DrawString('H', $font, [Drawing.Brushes]::White, (New-Object Drawing.RectangleF(0, 0, 32, 32)), $format)
+        $handle = $bitmap.GetHicon()
+        $icon = [Drawing.Icon]::FromHandle($handle)
+        try { return $icon.Clone() } finally { $icon.Dispose(); [void][LangHelper.ClipboardWatcher]::DestroyIcon($handle) }
+    } finally { $format.Dispose(); $font.Dispose(); $brush.Dispose(); $graphics.Dispose(); $bitmap.Dispose() }
 }
 
-$menu = New-Object Windows.Forms.ContextMenuStrip
-
-$miTranslate = $menu.Items.Add('Translate clipboard now')
-$miTranslate.Add_Click({
-    $t = Get-ClipboardTextSafely
-    if ($t.Trim()) { Show-Translation -Text $t.Trim() }
-})
-
-$miProvider = New-Object Windows.Forms.ToolStripMenuItem 'Provider'
-foreach ($p in @('auto', 'vscode', 'copilot-cli')) {
-    $item = New-Object Windows.Forms.ToolStripMenuItem $p
-    $item.Tag = $p
-    $item.Checked = ($script:Config.Provider -eq $p)
-    $item.Add_Click({
-        param($s, $e)
-        $script:Config.Provider = [string]$s.Tag
-        foreach ($sib in $s.Owner.Items) { $sib.Checked = ($sib.Tag -eq $s.Tag) }
-        Save-Config $script:Config
-        Write-Log "provider set to $($script:Config.Provider)"
-    })
-    [void]$miProvider.DropDownItems.Add($item)
-}
-[void]$menu.Items.Add($miProvider)
-
-$miLast = $menu.Items.Add('Show last result')
-$miLast.Add_Click({
-    $f = Join-Path $script:DataDir 'last-result.txt'
-    if (Test-Path -LiteralPath $f) {
-        if (-not $script:Form -or $script:Form.IsDisposed) { [void](New-TranslatorWindow) }
-        $script:Form.Show()
-        Set-Result -Text ([System.IO.File]::ReadAllText($f, $script:Utf8)) -Status 'Last result'
-    }
-})
-$miHistory = $menu.Items.Add('Open history')
-$miHistory.Add_Click({
-    $f = Join-Path $script:DataDir 'history.jsonl'
-    if (Test-Path -LiteralPath $f) { Start-Process notepad.exe $f } else {
-        [Windows.Forms.MessageBox]::Show('No history yet.', 'LangHelper', 'OK', 'Information') | Out-Null
-    }
-})
-
-$miLog = $menu.Items.Add('Open log')
-$miLog.Add_Click({
-    $f = Join-Path $script:LogDir ("langhelper_{0}.log" -f (Get-Date -Format 'yyyyMM'))
-    if (Test-Path -LiteralPath $f) { Start-Process notepad.exe $f }
-})
-
-$miConfig = $menu.Items.Add('Edit langhelper.ini')
-$miConfig.Add_Click({
-    if (-not (Test-Path -LiteralPath $script:IniPath)) { Save-Config $script:Config }
-    Start-Process notepad.exe $script:IniPath
-})
-
-$miReload = $menu.Items.Add('Reload config')
-$miReload.Add_Click({
-    $script:Config = Read-Config
-    if ($script:Form -and -not $script:Form.IsDisposed) { $script:Form.Dispose(); $script:Form = $null }
-    Write-Log 'config reloaded'
-})
-
-[void]$menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
-$miExit = $menu.Items.Add('Exit')
-
-$tray = New-Object Windows.Forms.NotifyIcon
-$tray.Icon = New-TrayIcon
-$tray.Text = 'LangHelper — Ctrl+C, Ctrl+C to translate'
-$tray.Visible = $true
-$tray.ContextMenuStrip = $menu
-$tray.Add_MouseDoubleClick({
-    $t = Get-ClipboardTextSafely
-    if ($t.Trim()) { Show-Translation -Text $t.Trim() }
-})
-
-# --- Wire up and run -----------------------------------------------------------
-$watcher = New-Object LangHelper.ClipboardWatcher
-$watcher.add_ClipboardUpdate({ Invoke-ClipboardTrigger })
-
-# The backend runs in its own runspace; this pump moves the result onto the UI thread.
-$pump = New-Object Windows.Forms.Timer
-$pump.Interval = 120
-$pump.Add_Tick({ Complete-Translation })
-$pump.Start()
-
-$context = New-Object Windows.Forms.ApplicationContext
-$miExit.Add_Click({
-    $pump.Stop()
-    Stop-Translation
-    $tray.Visible = $false
-    $tray.Dispose()
-    $watcher.Dispose()
-    $context.ExitThread()
-})
-
-Write-Log "started (provider=$($script:Config.Provider), features=$($script:Config.Features))"
-$tray.ShowBalloonTip(3000, 'LangHelper', 'Ready. Press Ctrl+C twice to translate.', 'Info')
-
-if ($Translate) {
-    $t = Get-ClipboardTextSafely
-    if ($t.Trim()) { Show-Translation -Text $t.Trim() }
-}
-
+$mutex = New-Object Threading.Mutex($false, 'Local\LangHelper.Tray')
+$owned = $false
+$tray = $null
+$watcher = $null
+$pump = $null
+$context = $null
 try {
+    try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
+    if (-not $owned) {
+        [Windows.Forms.MessageBox]::Show('LangHelper is already running. Exit the existing green H tray icon first.', 'LangHelper') | Out-Null
+        return
+    }
+    Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+namespace LangHelper {
+    public class ClipboardWatcher : NativeWindow, IDisposable {
+        public event EventHandler ClipboardUpdate;
+        [DllImport("user32.dll", SetLastError=true)] static extern bool AddClipboardFormatListener(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern bool RemoveClipboardFormatListener(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
+        [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr icon);
+        public ClipboardWatcher() {
+            CreateHandle(new CreateParams());
+            if (!AddClipboardFormatListener(Handle)) {
+                int error = Marshal.GetLastWin32Error();
+                DestroyHandle();
+                throw new Win32Exception(error);
+            }
+        }
+        public static bool IsCtrlDown() { return (GetAsyncKeyState(0x11) & 0x8000) != 0; }
+        protected override void WndProc(ref Message m) {
+            if (m.Msg == 0x031D && ClipboardUpdate != null) ClipboardUpdate(this, EventArgs.Empty);
+            base.WndProc(ref m);
+        }
+        public void Dispose() { RemoveClipboardFormatListener(Handle); DestroyHandle(); }
+    }
+}
+'@
+    $menu = New-Object Windows.Forms.ContextMenuStrip
+    $open = $menu.Items.Add('Open translator window')
+    $open.Add_Click({ [void](Show-Translation '' -NoTranslate) })
+    $now = $menu.Items.Add('Translate clipboard now')
+    $now.Add_Click({
+        try { $text = Get-ClipboardTextSafely; if ($text.Trim()) { [void](Show-Translation $text.Trim()) } }
+        catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'LangHelper') | Out-Null }
+    })
+    $providerMenu = New-Object Windows.Forms.ToolStripMenuItem 'Provider (new windows)'
+    foreach ($provider in @('vscode', 'copilot-cli', 'auto')) {
+        $item = New-Object Windows.Forms.ToolStripMenuItem $provider
+        $item.Tag = $provider
+        $item.Checked = ($provider -eq $script:Config.Provider)
+        $item.Add_Click({
+            param($s, $e)
+            try {
+                $script:Config.Provider = [string]$s.Tag
+                # Model IDs are provider-specific; do not carry a VS Code ID into CLI.
+                $script:Config.Model = if ($s.Tag -eq 'copilot-cli') { '' } else { 'claude-sonnet-5.5' }
+                Save-Config
+                foreach ($sibling in $s.Owner.Items) { $sibling.Checked = ($sibling.Tag -eq $s.Tag) }
+            } catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'LangHelper') | Out-Null }
+        })
+        [void]$providerMenu.DropDownItems.Add($item)
+    }
+    [void]$menu.Items.Add($providerMenu)
+    $last = $menu.Items.Add('Show last result')
+    $last.Add_Click({
+        $file = Join-Path $script:DataDir 'last-result.txt'
+        if (Test-Path -LiteralPath $file) {
+            $w = Show-Translation '' -NoTranslate
+            $split = Split-LangHelperResult ([IO.File]::ReadAllText($file))
+            Set-BoxText $w.Result $split.Main
+            Set-BoxText $w.Notes $split.Notes
+            Set-Status $w 'Last saved result'
+        }
+    })
+    foreach ($entry in @(@('Open history', (Join-Path $script:DataDir 'history.jsonl')), @('Open log', (Join-Path $script:LogDir ("langhelper_{0}.log" -f (Get-Date -Format 'yyyyMM')))), @('Edit langhelper.ini', $script:IniPath))) {
+        $item = $menu.Items.Add($entry[0]); $item.Tag = $entry[1]
+        $item.Add_Click({ param($s, $e) if (Test-Path -LiteralPath $s.Tag) { Start-Process notepad.exe -ArgumentList ('"{0}"' -f $s.Tag) } })
+    }
+    $reload = $menu.Items.Add('Reload config (new windows)')
+    $reload.Add_Click({
+        try { $script:Config = Read-LangHelperConfig $script:IniPath; Write-Log 'Config reloaded for new windows.' }
+        catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Invalid LangHelper settings') | Out-Null }
+    })
+    $exit = $menu.Items.Add('Exit')
+    $context = New-Object Windows.Forms.ApplicationContext
+    $exit.Add_Click({ $context.ExitThread() })
+    $tray = New-Object Windows.Forms.NotifyIcon
+    $tray.Icon = New-TrayIcon
+    $tray.Text = 'LangHelper - Ctrl+C, Ctrl+C'
+    $tray.ContextMenuStrip = $menu
+    $tray.Visible = $true
+    $tray.Add_MouseDoubleClick({ [void](Show-Translation '' -NoTranslate) })
+    $watcher = New-Object LangHelper.ClipboardWatcher
+    $watcher.add_ClipboardUpdate({ Invoke-ClipboardTrigger })
+    $pump = New-Object Windows.Forms.Timer
+    $pump.Interval = 100
+    $pump.Add_Tick({
+        foreach ($w in @($script:Windows.ToArray())) {
+            Complete-ModelRefresh $w
+            if ($w.PendingTranslate -and -not $w.CatalogJob) { $w.PendingTranslate = $false; Start-Translation $w }
+            Complete-Translation $w
+        }
+    })
+    $pump.Start()
+    Write-Log "started (provider=$($script:Config.Provider), SingleWindow=$($script:Config.SingleWindow))"
+    if ($Translate) { [void](Show-Translation (Get-ClipboardTextSafely)) }
     [Windows.Forms.Application]::Run($context)
+} catch {
+    Write-Log "startup/runtime failure: $($_.Exception.Message)"
+    [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'LangHelper failed') | Out-Null
+    throw
 } finally {
-    Write-Log 'stopped'
-    $script:Mutex.ReleaseMutex()
-    $script:Mutex.Dispose()
+    if ($pump) { $pump.Stop(); $pump.Dispose() }
+    foreach ($w in @($script:Windows.ToArray())) { $w.Form.Close(); $w.Form.Dispose() }
+    if ($watcher) { $watcher.Dispose() }
+    if ($tray) { $tray.Visible = $false; if ($tray.Icon) { $tray.Icon.Dispose() }; $tray.Dispose() }
+    if ($context) { $context.Dispose() }
+    if ($owned) { $mutex.ReleaseMutex() }
+    $mutex.Dispose()
 }

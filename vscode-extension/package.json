@@ -3,7 +3,7 @@
   "displayName": "LangHelper Bridge",
   "description": "Serves LangHelper translation requests using the GitHub Copilot language models available in VS Code.",
   "publisher": "langhelper",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "license": "MIT",
   "engines": {
     "vscode": "^1.90.0"
@@ -35,8 +35,8 @@
       "properties": {
         "langhelper.model": {
           "type": "string",
-          "default": "gpt-4o-mini",
-          "description": "Preferred Copilot model family. Falls back to any available Copilot model when this family is not offered."
+          "default": "claude-sonnet-5.5",
+          "description": "Copilot model ID or family. An unavailable explicit selection reports an error instead of silently choosing another model."
         }
       }
     }

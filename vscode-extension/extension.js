@@ -29,16 +29,17 @@ async function writeAtomic(target, text) {
   await fsp.rename(tmp, target);
 }
 
-async function pickModel(family) {
-  let models = [];
-  if (family) {
-    models = await vscode.lm.selectChatModels({ vendor: 'copilot', family });
-  }
-  if (!models.length) models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+async function pickModel(selection) {
+  const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
   if (!models.length) {
     throw new Error(
       'No GitHub Copilot language model is available. Open VS Code, make sure you are signed in to Copilot, then run "LangHelper: Test Copilot Connection".'
     );
+  }
+  if (selection) {
+    const selected = models.find((m) => m.id === selection || m.family === selection);
+    if (!selected) throw new Error(`The requested Copilot model "${selection}" is unavailable. Refresh the model list and select an available model.`);
+    return selected;
   }
   return models[0];
 }
@@ -60,6 +61,7 @@ async function runRequest(req) {
   if (!messages.length) throw new Error('Request contained no messages.');
 
   const cts = new vscode.CancellationTokenSource();
+  if (req.id) state.cancellations.set(req.id, cts);
   const timeoutMs = Number(req.timeoutMs) > 0 ? Number(req.timeoutMs) : 120000;
   const timer = setTimeout(() => cts.cancel(), timeoutMs);
   try {
@@ -67,8 +69,9 @@ async function runRequest(req) {
     let out = '';
     for await (const fragment of response.text) out += fragment;
     if (!out.trim()) throw new Error('The model returned an empty response.');
-    return { content: out, modelId: model.id };
+    return { content: out, modelId: model.id, modelName: model.name, provider: 'vscode' };
   } finally {
+    if (req.id) state.cancellations.delete(req.id);
     clearTimeout(timer);
     cts.dispose();
   }
@@ -115,13 +118,28 @@ async function handleRequestFile(fileName) {
 
     let payload;
     try {
-      const result = await runRequest(req);
-      payload = { id, ok: true, content: result.content, modelId: result.modelId };
-      log.appendLine(`[${new Date().toISOString()}] answered ${id} with ${result.modelId} (${result.content.length} chars)`);
+      if (req.action === 'cancel') {
+        const cts = state.cancellations.get(req.targetId);
+        if (cts) cts.cancel();
+        if (state.inFlight.has(`${req.targetId}.json`)) state.cancelled.add(req.targetId);
+        await fsp.rm(path.join(state.responseDir, `${req.targetId}.json`), { force: true });
+        return;
+      }
+      if (req.action === 'models') {
+        const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+        payload = { id, ok: true, models: models.map((m) => ({
+          id: m.id, name: m.name, family: m.family, vendor: m.vendor,
+        })) };
+      } else {
+        const result = await runRequest({ ...req, id });
+        payload = { id, ok: true, ...result };
+        log.appendLine(`[${new Date().toISOString()}] answered ${id} with ${result.modelId} (${result.content.length} chars)`);
+      }
     } catch (err) {
       payload = { id, ok: false, error: describeError(err) };
       log.appendLine(`[${new Date().toISOString()}] failed ${id}: ${payload.error}`);
     }
+    if (state.cancelled.delete(id)) return;
     await writeAtomic(path.join(state.responseDir, `${id}.json`), JSON.stringify(payload)).catch((e) =>
       log.appendLine(`[${new Date().toISOString()}] could not write response for ${id}: ${e}`)
     );
@@ -131,6 +149,7 @@ async function handleRequestFile(fileName) {
 }
 
 async function scan() {
+  if (!(await ensureLeader())) return;
   let files;
   try {
     files = await fsp.readdir(state.requestDir);
@@ -142,8 +161,41 @@ async function scan() {
   }
 }
 
+async function ensureLeader() {
+  if (state.lockHeld) return true;
+  if (state.claiming) return false;
+  state.claiming = true;
+  const lockPath = path.join(state.root, 'owner.json');
+  try {
+    let handle;
+    try {
+      handle = await fsp.open(lockPath, 'wx');
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      let owner;
+      try { owner = JSON.parse(await fsp.readFile(lockPath, 'utf8')); }
+      catch { return false; }
+      try { process.kill(owner.pid, 0); return false; }
+      catch (e) {
+        if (e.code !== 'ESRCH') return false;
+        await fsp.unlink(lockPath);
+        return false;
+      }
+    }
+    try { await handle.writeFile(JSON.stringify({ pid: process.pid })); }
+    finally { await handle.close(); }
+    state.lockHeld = true;
+    log.appendLine('This VS Code window owns the bridge; other windows stay on standby.');
+    return true;
+  } catch (err) {
+    log.appendLine(`Bridge ownership error: ${err.message}`);
+    return false;
+  } finally { state.claiming = false; }
+}
+
 async function writeHeartbeat() {
-  const payload = { pid: process.pid, updated: new Date().toISOString() };
+  if (!(await ensureLeader())) return;
+  const payload = { pid: process.pid, updated: new Date().toISOString(), protocolVersion: 2 };
   await writeAtomic(path.join(state.root, 'heartbeat.json'), JSON.stringify(payload)).catch(() => {});
 }
 
@@ -157,6 +209,10 @@ async function activate(context) {
     requestDir: path.join(root, 'requests'),
     responseDir: path.join(root, 'responses'),
     inFlight: new Set(),
+    cancellations: new Map(),
+    cancelled: new Set(),
+    lockHeld: false,
+    claiming: false,
   };
   await fsp.mkdir(state.requestDir, { recursive: true });
   await fsp.mkdir(state.responseDir, { recursive: true });
@@ -169,14 +225,18 @@ async function activate(context) {
     dispose: () => {
       clearInterval(heartbeat);
       clearInterval(poll);
-      fs.rmSync(path.join(state.root, 'heartbeat.json'), { force: true });
+      for (const cts of state.cancellations.values()) cts.cancel();
+      if (state.lockHeld) {
+        fs.rmSync(path.join(state.root, 'heartbeat.json'), { force: true });
+        fs.rmSync(path.join(state.root, 'owner.json'), { force: true });
+      }
     },
   });
 
   // fs.watch reacts faster than the poll; the poll stays as the reliability net.
   try {
     const watcher = fs.watch(state.requestDir, (_evt, fileName) => {
-      if (fileName && String(fileName).toLowerCase().endsWith('.json')) void handleRequestFile(String(fileName));
+      if (fileName && String(fileName).toLowerCase().endsWith('.json')) void scan();
     });
     context.subscriptions.push({ dispose: () => watcher.close() });
   } catch (e) {

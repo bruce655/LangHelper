@@ -74,6 +74,7 @@ jobs:
             'LangHelper.cmd',
             'langhelper-tray.ps1',
             'langhelper.ps1',
+            'langhelper-common.ps1',
             'install.ps1',
             'langhelper.ini.example',
             'prompt.md',

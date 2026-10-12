@@ -1,0 +1,83 @@
+#requires -Version 5.1
+$ErrorActionPreference = 'Stop'
+$repo = Split-Path -Parent $PSScriptRoot
+$testRoot = Join-Path ([IO.Path]::GetTempPath()) ("langhelper-ui-test-" + [guid]::NewGuid().ToString('n'))
+[void][IO.Directory]::CreateDirectory($testRoot)
+$configPath = Join-Path $testRoot 'langhelper.ini'
+Copy-Item -LiteralPath (Join-Path $repo 'langhelper.ini.example') -Destination $configPath
+function Assert($condition, $message) { if (-not $condition) { throw $message } }
+try {
+    . (Join-Path $repo 'langhelper-tray.ps1') -ConfigFile $configPath -TestMode
+    $script:Backend = Join-Path $repo 'tests\fake-backend.ps1'
+    $script:DataDir = $testRoot
+    $script:LogDir = $testRoot
+    $script:Config.AutoCopyResult = '0'
+    $script:CopiedText = ''
+    function Set-ClipboardQuietly { param([string]$Text) $script:CopiedText = $Text }
+    $cfg = Read-LangHelperConfig $configPath
+    Assert ($cfg.Provider -eq 'vscode' -and $cfg.Model -eq 'claude-sonnet-5.5') 'Wrong defaults.'
+    Assert ($cfg.SingleWindow -eq '0' -and $cfg.AutoCopyResult -eq '1') 'Wrong window/copy defaults.'
+    Assert (-not $cfg.Contains('SaveHistory')) 'SaveHistory must be removed.'
+    $cfg.Model = 'one,two'
+    Save-LangHelperConfig $cfg $configPath (Join-Path $repo 'langhelper.ini.example')
+    $rejected = $false
+    try { [void](Read-LangHelperConfig $configPath) } catch { $rejected = $true }
+    Assert $rejected 'Comma-separated models must be rejected.'
+    $cfg.Model = 'claude-sonnet-5.5'
+    Save-LangHelperConfig $cfg $configPath (Join-Path $repo 'langhelper.ini.example')
+    Assert ([IO.File]::ReadAllText($configPath).Contains('; Provider for new windows')) 'Config comments were lost.'
+    $split = Split-LangHelperResult ('Before' + "`n" + '```text' + "`nhello`n" + '```' + "`nnotes")
+    Assert ($split.Main -eq 'hello' -and $split.Notes.Contains('notes')) 'Fenced output split failed.'
+    $split = Split-LangHelperResult "## English`nHello`n## Notes`nExplanation"
+    Assert ($split.Main -eq 'Hello' -and $split.Notes.Contains('Explanation')) 'Heading split failed.'
+    $split = Split-LangHelperResult 'Plain output'
+    Assert ($split.Main -eq 'Plain output' -and -not $split.Notes) 'Plain output split failed.'
+    $split = Split-LangHelperResult ('```' + "`n`n" + '```' + "`nVisible result")
+    Assert ($split.Main.Contains('Visible result')) 'An empty fenced block must not hide the result.'
+    $rawPrompt = Join-Path $testRoot 'raw.md'
+    [IO.File]::WriteAllText($rawPrompt, 'Translate the input. Return a translation and notes.')
+    $script:Config.PromptFile = $rawPrompt
+    $a = Show-Translation 'original A' -NoTranslate
+    $b = Show-Translation 'original B' -NoTranslate
+    Assert ($script:Windows.Count -eq 2 -and $a.Form -ne $b.Form) 'Multi-window mode failed.'
+    Assert (-not $a.Source.ReadOnly -and $a.Snapshot.ReadOnly -and $a.Notes.ReadOnly) 'Text area permissions incorrect.'
+    Assert ($a.FeatureLabel.Text.Contains('Features') -and -not $a.PromptInfo.Modular) 'Raw prompt notice missing.'
+    $a.Source.Text = 'slow'
+    $b.Source.Text = 'fast'
+    Assert ($a.Snapshot.Text -eq 'original A') 'Editing source changed snapshot.'
+    foreach ($w in @($a, $b)) {
+        $w.AutoCopy = $true
+        $w.Models = @([pscustomobject]@{ id = 'verified-sonnet'; name = 'Sonnet 5.5'; family = 'claude-sonnet-5.5' })
+        [void]$w.Model.Items.Add('(Provider default)')
+        [void]$w.Model.Items.Add('Sonnet 5.5')
+        $w.Model.SelectedIndex = 1
+        Start-Translation $w
+    }
+    $deadline = (Get-Date).AddSeconds(10)
+    while (($a.Job -or $b.Job) -and (Get-Date) -lt $deadline) {
+        Complete-Translation $a
+        Complete-Translation $b
+        [Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 30
+    }
+    Assert (-not $a.Job -and -not $b.Job) 'Jobs did not complete.'
+    Assert ($a.Result.Text -eq 'translated: slow' -and $b.Result.Text -eq 'translated: fast') 'Results crossed windows.'
+    Assert ($a.Notes.Text -eq 'Notes: slow' -and $b.Notes.Text -eq 'Notes: fast') 'Notes crossed windows.'
+    Assert ($script:CopiedText -eq 'translated: slow') 'Auto-copy must copy only the last completed main translation.'
+    Assert ($a.Status.Text.Contains('verified-sonnet')) 'Actual model is not displayed.'
+    $history = @(Get-Content -LiteralPath (Join-Path $testRoot 'history.jsonl') | ForEach-Object { $_ | ConvertFrom-Json })
+    Assert ($history.Count -eq 2 -and $history[0].model -eq 'verified-sonnet') 'History metadata is incorrect.'
+    Start-Translation $a
+    $a.Form.Close()
+    Assert ($script:Windows.Count -eq 1 -and -not $a.Job) 'Closing a window did not cancel its job.'
+    $script:Config.SingleWindow = '1'
+    $reused = Show-Translation 'new source' -NoTranslate
+    Assert ($reused.Form -eq $b.Form -and $script:Windows.Count -eq 1) 'SingleWindow reuse failed.'
+    $b.Form.Close()
+    Write-Output 'PASS: INI validation, split output, raw prompt notice, four controls, independent jobs/history, cancellation and single-window reuse.'
+} finally {
+    if (Get-Variable Windows -Scope Script -ErrorAction SilentlyContinue) {
+        foreach ($w in @($script:Windows.ToArray())) { $w.Form.Close(); $w.Form.Dispose() }
+    }
+    Remove-Item -LiteralPath $testRoot -Recurse -Force
+}

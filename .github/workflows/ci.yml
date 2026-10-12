@@ -52,6 +52,16 @@ jobs:
             throw "package.json 'main' points at a missing file: $($manifest.main)"
           }
 
+      - name: Test bridge and Windows PowerShell UI
+        shell: pwsh
+        run: |
+          node --test .\tests\bridge.test.js
+          if ($LASTEXITCODE -ne 0) { throw 'Bridge regression tests failed.' }
+          powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\ui.tests.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Windows PowerShell UI tests failed.' }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\backend.tests.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Backend regression tests failed.' }
+
       - name: Test prompt assembly
         shell: pwsh
         run: |

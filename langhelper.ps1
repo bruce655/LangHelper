@@ -24,7 +24,7 @@
     Empty string means Core-only (translate to English).
 
 .PARAMETER Model
-    For vscode, a Copilot model family such as gpt-4o-mini. For copilot-cli, a
+    For vscode, a Copilot model ID or family such as claude-sonnet-5.5. For copilot-cli, a
     `copilot --model` value. Empty lets the provider choose.
 
 .PARAMETER PromptFile
@@ -53,13 +53,14 @@
 [CmdletBinding()]
 param(
     [ValidateSet('auto', 'vscode', 'copilot-cli')]
-    [string]$Provider = "auto",
+    [string]$Provider = "vscode",
     [string]$Features = "",
     [string]$Model = "",
     [string]$PromptFile = "",
     [Parameter(Mandatory)][string]$InputFile,
     [Parameter(Mandatory)][string]$OutputFile,
-    [int]$TimeoutSec = 120,
+    [ValidateRange(1, 3600)][int]$TimeoutSec = 120,
+    [switch]$PassThru,
     [switch]$DryRun
 )
 
@@ -67,9 +68,11 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $scriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $scriptDir 'langhelper-common.ps1')
 
 # Use the external prompt file when provided and present; otherwise the bundled one.
-if ($PromptFile -and (Test-Path -LiteralPath $PromptFile)) {
+if ($PromptFile) {
+    if (-not (Test-Path -LiteralPath $PromptFile)) { throw "Prompt file not found: $PromptFile" }
     $promptPath = (Resolve-Path -LiteralPath $PromptFile).Path
 } else {
     $promptPath = Join-Path $scriptDir 'prompt.md'
@@ -180,11 +183,6 @@ if ($DryRun) {
 }
 
 # --- Backend helpers -----------------------------------------------------------
-function Get-BridgeRoot {
-    $base = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $env:USERPROFILE 'AppData\Local' }
-    return (Join-Path $base 'LangHelper\bridge')
-}
-
 function Test-BridgeAlive {
     param([Parameter(Mandatory)][string]$Root, [int]$MaxAgeSec = 90)
 
@@ -193,68 +191,34 @@ function Test-BridgeAlive {
     try {
         $obj = [System.IO.File]::ReadAllText($hb) | ConvertFrom-Json
         return ([datetime]$obj.updated).ToUniversalTime() -gt (Get-Date).ToUniversalTime().AddSeconds(-$MaxAgeSec)
-    } catch { return $false }
+    } catch {
+        Write-Warning "Cannot read Bridge heartbeat: $($_.Exception.Message)"
+        return $false
+    }
 }
 
 function Invoke-VSCodeBridge {
     param(
-        [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$SystemPrompt,
         [Parameter(Mandatory)][string]$UserPrompt,
         [string]$Model = '',
         [int]$TimeoutSec = 120
     )
 
-    $reqDir = Join-Path $Root 'requests'
-    $resDir = Join-Path $Root 'responses'
-    foreach ($d in @($reqDir, $resDir)) {
-        if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
-    }
-
-    if (-not (Test-BridgeAlive -Root $Root)) {
-        throw "The LangHelper Bridge is not responding. Start VS Code (with the LangHelper Bridge extension installed) or switch Provider to copilot-cli."
-    }
-
-    $id      = [guid]::NewGuid().ToString('n')
-    $resFile = Join-Path $resDir "$id.json"
-
     # The stable VS Code language model API has no system role. Two separate user
     # turns read as a stalled conversation and the model echoes the input, so the
     # instructions and the clipboard go in one turn instead.
     $combined = $SystemPrompt + "`n`n" + $UserPrompt
     $payload = @{
-        id        = $id
         model     = $Model
         timeoutMs = $TimeoutSec * 1000
         messages  = @(
             @{ role = 'user'; content = $combined }
         )
-    } | ConvertTo-Json -Depth 6 -Compress
-
-    # Write to a temp name first so the extension never reads a half-written file.
-    $tmp = Join-Path $reqDir "$id.json.tmp"
-    [System.IO.File]::WriteAllText($tmp, $payload, (New-Object System.Text.UTF8Encoding $false))
-    [System.IO.File]::Move($tmp, (Join-Path $reqDir "$id.json"))
-
-    $deadline = (Get-Date).AddSeconds($TimeoutSec)
-    try {
-        while ((Get-Date) -lt $deadline) {
-            if (Test-Path -LiteralPath $resFile) {
-                $raw = $null
-                for ($i = 0; $i -lt 20 -and -not $raw; $i++) {
-                    try { $raw = [System.IO.File]::ReadAllText($resFile) } catch { Start-Sleep -Milliseconds 50 }
-                }
-                $obj = $raw | ConvertFrom-Json
-                if (-not $obj.ok) { throw "LangHelper Bridge: $($obj.error)" }
-                return [string]$obj.content
-            }
-            Start-Sleep -Milliseconds 120
-        }
-    } finally {
-        Remove-Item -LiteralPath $resFile -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath (Join-Path $reqDir "$id.json") -Force -ErrorAction SilentlyContinue
     }
-    throw "The LangHelper Bridge did not answer within $TimeoutSec s."
+
+    $obj = Invoke-LangHelperBridge -Payload $payload -TimeoutSec $TimeoutSec
+    return [pscustomobject]@{ content = [string]$obj.content; provider = 'vscode'; modelId = $obj.modelId; modelName = $obj.modelName; modelVerified = $true }
 }
 
 function Invoke-CopilotCli {
@@ -265,6 +229,7 @@ function Invoke-CopilotCli {
         [int]$TimeoutSec = 300
     )
 
+    if (-not $Model) { throw 'Copilot CLI requires an explicit model ID. Select the CLI provider and enter its model ID.' }
     $copilot = Get-Command copilot -ErrorAction SilentlyContinue
     if (-not $copilot) {
         throw "The GitHub Copilot CLI is not on PATH. Install it with 'npm install -g @github/copilot', then run 'copilot' once to sign in."
@@ -282,24 +247,49 @@ function Invoke-CopilotCli {
         '-p', $prompt,
         '--no-color', '--log-level', 'none',
         '--disable-builtin-mcps', '--no-custom-instructions', '--no-ask-user',
-        '--allow-all-tools'
+        '--deny-tool', '*'
     )
     if ($Model) { $cliArgs += @('--model', $Model) }
 
+    [IO.File]::WriteAllText((Join-Path $work 'args.json'), (@{ executable = $copilot.Source; arguments = $cliArgs } | ConvertTo-Json -Depth 4), $utf8NoBom)
+    $command = @'
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$config = [IO.File]::ReadAllText((Join-Path (Get-Location) 'args.json')) | ConvertFrom-Json
+$arguments = @($config.arguments | ForEach-Object { $_ -replace '"', '\"' })
+& $config.executable @arguments
+exit $LASTEXITCODE
+'@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    $proc = $null
     try {
-        $proc = Start-Process -FilePath $copilot.Source -ArgumentList $cliArgs -WorkingDirectory $work `
+        $executable = $copilot.Source
+        $arguments = ($cliArgs | ForEach-Object { ConvertTo-LangHelperNativeArgument $_ }) -join ' '
+        if ([IO.Path]::GetExtension($executable) -ne '.exe') {
+            $executable = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+            $arguments = "-NoProfile -EncodedCommand $encoded"
+        }
+        $proc = Start-Process -FilePath $executable -ArgumentList $arguments -WorkingDirectory $work `
             -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        $processHandle = $proc.Handle
         if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
-            try { $proc.Kill() } catch { }
             throw "The Copilot CLI did not finish within $TimeoutSec s."
         }
+        $proc.Refresh()
         $raw = if (Test-Path -LiteralPath $stdout) { [System.IO.File]::ReadAllText($stdout) } else { '' }
         if ($proc.ExitCode -ne 0) {
             $err = if (Test-Path -LiteralPath $stderr) { [System.IO.File]::ReadAllText($stderr) } else { '' }
             throw "copilot exited with $($proc.ExitCode).`n$err`n$raw"
         }
     } finally {
-        Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        if ($proc -and -not $proc.HasExited) {
+            Get-CimInstance Win32_Process -Filter "ParentProcessId=$($proc.Id)" |
+                ForEach-Object { Stop-Process -Id $_.ProcessId -ErrorAction Stop }
+            $proc.Kill()
+            $proc.WaitForExit()
+        }
+        if ($proc) { $proc.Dispose() }
+        Remove-Item -LiteralPath $work -Recurse -Force
     }
 
     # Strip the CLI's trailing usage summary (Changes / AI Credits / Tokens / Resume).
@@ -311,11 +301,11 @@ function Invoke-CopilotCli {
     }
     $content = ($lines[0..([Math]::Max($cut - 1, 0))] -join "`n").Trim()
     if (-not $content) { throw "The Copilot CLI returned no text.`n$raw" }
-    return $content
+    return [pscustomobject]@{ content = $content; provider = 'copilot-cli'; modelId = $Model; modelName = $Model; modelVerified = $false }
 }
 
 # --- Call the model ------------------------------------------------------------
-$bridgeRoot = Get-BridgeRoot
+$bridgeRoot = Get-LangHelperBridgeRoot
 
 $chain = switch ($Provider) {
     'vscode'      { @('vscode') }
@@ -330,8 +320,8 @@ $failures = New-Object System.Collections.Generic.List[string]
 foreach ($p in $chain) {
     try {
         $response = switch ($p) {
-            'vscode'      { Invoke-VSCodeBridge -Root $bridgeRoot -SystemPrompt $systemPrompt -UserPrompt $userPrompt -Model $Model -TimeoutSec $TimeoutSec }
-            'copilot-cli' { Invoke-CopilotCli -SystemPrompt $systemPrompt -UserPrompt $userPrompt -Model $Model -TimeoutSec ([Math]::Max($TimeoutSec, 300)) }
+            'vscode'      { Invoke-VSCodeBridge -SystemPrompt $systemPrompt -UserPrompt $userPrompt -Model $Model -TimeoutSec $TimeoutSec }
+            'copilot-cli' { Invoke-CopilotCli -SystemPrompt $systemPrompt -UserPrompt $userPrompt -Model $Model -TimeoutSec $TimeoutSec }
         }
         Write-Verbose "LangHelper answered via provider '$p'."
         break
@@ -342,4 +332,15 @@ foreach ($p in $chain) {
 
 if ($null -eq $response) { throw ($failures -join "`n`n") }
 
-[System.IO.File]::WriteAllText($OutputFile, $response, $utf8NoBom)
+[System.IO.File]::WriteAllText($OutputFile, $response.content, $utf8NoBom)
+if ($PassThru) {
+    [pscustomobject]@{
+        Content = $response.content
+        Provider = $response.provider
+        ModelId = $response.modelId
+        ModelName = $response.modelName
+        ModelVerified = $response.modelVerified
+        Fallback = ($failures.Count -gt 0)
+        Failures = @($failures)
+    }
+}

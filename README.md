@@ -206,10 +206,6 @@ WinForms compilation differences. To restart, choose tray **Exit**, then launch
 [LangHelper.cmd](LangHelper.cmd) again. Closing a translation window is not the
 same as exiting the tray application.
 
-The CMD launcher passes `-DetachConsole` to detach its PowerShell console as
-well as hide it, avoiding a persistent terminal taskbar icon. Direct PowerShell
-launches retain their console for diagnostics; translation windows remain visible.
-
 ### How the trigger works
 
 There is no keyboard hook. The tray app registers a Win32 clipboard listener

@@ -3,7 +3,6 @@
 param(
     [string]$ConfigFile = '',
     [switch]$Translate,
-    [switch]$DetachConsole,
     [switch]$TestMode
 )
 
@@ -12,26 +11,9 @@ if ($PSVersionTable.PSEdition -eq 'Core' -or [Threading.Thread]::CurrentThread.G
     $arguments = @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $PSCommandPath))
     if ($ConfigFile) { $arguments += @('-ConfigFile', ('"{0}"' -f $ConfigFile)) }
     if ($Translate) { $arguments += '-Translate' }
-    if ($DetachConsole) { $arguments += '-DetachConsole' }
     if ($TestMode) { throw 'UI tests must run in Windows PowerShell 5.1 with -STA.' }
     Start-Process "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList $arguments
     return
-}
-
-if ($DetachConsole -and -not $TestMode) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-namespace LangHelper {
-    public static class ConsoleHost {
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern bool FreeConsole();
-    }
-}
-'@
-    if (-not [LangHelper.ConsoleHost]::FreeConsole()) {
-        throw "Could not detach the launcher console: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
-    }
 }
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing

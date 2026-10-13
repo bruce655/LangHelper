@@ -189,10 +189,6 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\langhelper-tray.p
 若要重新啟動，先從系統匣選擇 **Exit**，再啟動 [LangHelper.cmd](LangHelper.cmd)。
 關閉翻譯視窗不等於結束系統匣程式。
 
-CMD 啟動器使用 `-DetachConsole` 分離 PowerShell console，搭配隱藏視窗，
-避免持續顯示終端機工作列圖示。直接從 PowerShell 啟動仍保留 console 方便除錯，
-翻譯視窗不會被隱藏。
-
 ### 觸發原理
 
 程式不使用鍵盤 hook。系統匣程式透過 `AddClipboardFormatListener` 註冊 Win32 剪貼簿監聽，

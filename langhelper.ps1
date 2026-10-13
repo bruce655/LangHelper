@@ -256,8 +256,10 @@ exit $LASTEXITCODE
         $proc = Start-Process -FilePath $executable -ArgumentList $arguments -WorkingDirectory $work `
             -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
         $processHandle = $proc.Handle
-        if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
-            throw "The Copilot CLI did not finish within $TimeoutSec s."
+        # Short waits let a pipeline stop reach the finally block promptly.
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)
+        while (-not $proc.WaitForExit(200)) {
+            if ([DateTime]::UtcNow -ge $deadline) { throw "The Copilot CLI did not finish within $TimeoutSec s." }
         }
         $proc.Refresh()
         $raw = if (Test-Path -LiteralPath $stdout) { [System.IO.File]::ReadAllText($stdout) } else { '' }
@@ -267,9 +269,9 @@ exit $LASTEXITCODE
         }
     } finally {
         if ($proc -and -not $proc.HasExited) {
-            Get-CimInstance Win32_Process -Filter "ParentProcessId=$($proc.Id)" |
-                ForEach-Object { Stop-Process -Id $_.ProcessId -ErrorAction Stop }
-            $proc.Kill()
+            # /T terminates the whole tree (e.g. powershell -> cmd -> node), not only direct children.
+            & "$env:SystemRoot\System32\taskkill.exe" /PID $proc.Id /T /F *> $null
+            if (-not $proc.HasExited) { $proc.Kill() }
             $proc.WaitForExit()
         }
         if ($proc) { $proc.Dispose() }

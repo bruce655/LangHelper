@@ -379,8 +379,24 @@ function New-TranslatorWindow {
     $defaults.Text = 'Save as defaults'; $defaults.AutoSize = $true
     $close = New-Object Windows.Forms.Button
     $close.Text = 'Close'; $close.AutoSize = $true
-    foreach ($button in @($translateButton, $copy, $defaults, $close)) { [void]$buttons.Controls.Add($button) }
-    $table.Controls.Add($buttons, 0, 12)
+    foreach ($button in @($translateButton, $copy, $defaults)) { [void]$buttons.Controls.Add($button) }
+    $buttonRow = New-Object Windows.Forms.Panel
+    $buttonRow.Dock = 'Fill'
+    $buttons.WrapContents = $false
+    $buttons.AutoSize = $true
+    $buttons.Dock = 'Left'
+    $buttonRow.Controls.Add($buttons)
+    $close.Name = 'CloseButton'
+    $close.Anchor = 'Top, Right'
+    $buttonRow.Controls.Add($close)
+    $buttonRow.Add_Resize({
+        param($s, $e)
+        $closeButton = $s.Controls['CloseButton']
+        $margin = $closeButton.Margin
+        $closeButton.Location = New-Object Drawing.Point([math]::Max(0, $s.ClientSize.Width - $closeButton.Width - $margin.Right), $margin.Top)
+    })
+    $window | Add-Member -NotePropertyName CloseButton -NotePropertyValue $close
+    $table.Controls.Add($buttonRow, 0, 12)
     $form.Controls.Add($table)
     $form.AcceptButton = $translateButton
     $refresh.Add_Click({ param($s, $e) Start-ModelRefresh $s.FindForm().Tag })
@@ -545,6 +561,7 @@ namespace LangHelper {
         catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'LangHelper') | Out-Null }
     })
     $providerMenu = New-Object Windows.Forms.ToolStripMenuItem 'Provider (new windows)'
+    $script:ProviderMenu = $providerMenu
     foreach ($provider in @('vscode', 'copilot-cli', 'auto')) {
         $item = New-Object Windows.Forms.ToolStripMenuItem $provider
         $item.Tag = $provider
@@ -552,9 +569,12 @@ namespace LangHelper {
         $item.Add_Click({
             param($s, $e)
             try {
+                $previous = [string]$script:Config.Provider
                 $script:Config.Provider = [string]$s.Tag
-                # Model IDs are provider-specific; do not carry a VS Code ID into CLI.
-                $script:Config.Model = if ($s.Tag -eq 'copilot-cli') { '' } else { 'claude-sonnet-5.5' }
+                # Model IDs are provider-specific; do not carry a VS Code ID into CLI,
+                # but keep a custom VS Code model when moving between vscode and auto.
+                if ($s.Tag -eq 'copilot-cli') { $script:Config.Model = '' }
+                elseif ($previous -eq 'copilot-cli' -or -not [string]$script:Config.Model) { $script:Config.Model = 'claude-sonnet-5.5' }
                 Save-Config
                 foreach ($sibling in $s.Owner.Items) { $sibling.Checked = ($sibling.Tag -eq $s.Tag) }
             } catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'LangHelper') | Out-Null }
@@ -579,7 +599,11 @@ namespace LangHelper {
     }
     $reload = $menu.Items.Add('Reload config (new windows)')
     $reload.Add_Click({
-        try { $script:Config = Read-LangHelperConfig $script:IniPath; Write-Log 'Config reloaded for new windows.' }
+        try {
+            $script:Config = Read-LangHelperConfig $script:IniPath
+            foreach ($providerItem in $script:ProviderMenu.DropDownItems) { $providerItem.Checked = ($providerItem.Tag -eq $script:Config.Provider) }
+            Write-Log 'Config reloaded for new windows.'
+        }
         catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Invalid LangHelper settings') | Out-Null }
     })
     $exit = $menu.Items.Add('Exit')

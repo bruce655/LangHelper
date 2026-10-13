@@ -105,6 +105,21 @@ exit $LASTEXITCODE
         Assert ($wrapped.Count -eq 1 -and $wrapped[0].Content -eq 'CLI translated') "$wrapper CLI wrapper changed quoted input."
         $shell.Dispose(); $shell = $null
     }
+    $sleeperPath = Join-Path $testRoot 'lhsleeper.exe'
+    Copy-Item -LiteralPath "$env:SystemRoot\System32\PING.EXE" -Destination $sleeperPath
+    [IO.File]::WriteAllText((Join-Path $shimDirectory 'copilot.cmd'), "@echo off`r`n`"$sleeperPath`" -n 60 127.0.0.1 >nul`r`n")
+    $timeoutParameters = $parameters.Clone(); $timeoutParameters.TimeoutSec = 2
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $shell = [powershell]::Create()
+    [void]$shell.AddCommand((Join-Path $repo 'langhelper.ps1')).AddParameters($timeoutParameters)
+    try { [void]$shell.Invoke() } catch { }
+    $timedOutCli = ($shell.Streams.Error | Out-String).Contains('within 2') -or $shell.HadErrors
+    $shell.Dispose(); $shell = $null
+    Start-Sleep -Milliseconds 500
+    $leftover = @(Get-Process -Name 'lhsleeper' -ErrorAction SilentlyContinue)
+    $leftover | ForEach-Object { Stop-Process -Id $_.Id -Force }
+    Assert ($timedOutCli -and $watch.Elapsed.TotalSeconds -lt 10) 'CLI timeout was not enforced promptly.'
+    Assert ($leftover.Count -eq 0) 'CLI timeout left a descendant process running.'
     Remove-Item -LiteralPath (Join-Path $shimDirectory 'copilot.cmd')
     Remove-Item -LiteralPath (Join-Path $root 'heartbeat.json')
     $parameters.Provider = 'auto'

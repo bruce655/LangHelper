@@ -40,6 +40,31 @@ try {
     $a = Show-Translation 'original A' -NoTranslate
     $b = Show-Translation 'original B' -NoTranslate
     Assert ($script:Windows.Count -eq 2 -and $a.Form -ne $b.Form) 'Multi-window mode failed.'
+    [Windows.Forms.Application]::DoEvents()
+    $a.Form.StartPosition = 'Manual'; $a.Form.Location = New-Object Drawing.Point(50, 50)
+    $a.Form.Show()
+    $shotDir = $env:LANGHELPER_UI_SCREENSHOT_DIR
+    if ($shotDir) { [void][IO.Directory]::CreateDirectory($shotDir) }
+    foreach ($size in @(@(960, 850), @(820, 650), @(1400, 900))) {
+        $a.Form.Size = New-Object Drawing.Size($size[0], $size[1])
+        [Windows.Forms.Application]::DoEvents()
+        $row = $a.CloseButton.Parent
+        $left = @($row.Controls[0].Controls)
+        $label = "$($size[0])x$($size[1])"
+        Assert ($left.Count -eq 3 -and $a.CloseButton.Visible) "Bottom buttons are missing at $label."
+        foreach ($button in @($left + $a.CloseButton)) {
+            Assert ($button.Visible -and $button.Left -ge 0 -and $button.Right -le $row.ClientSize.Width -and $button.Bottom -le $row.ClientSize.Height) "Button '$($button.Text)' is clipped at $label."
+        }
+        Assert (@($left | Where-Object { $_.Top -ne $left[0].Top }).Count -eq 0 -and $a.CloseButton.Top -eq $left[0].Top) "Bottom buttons are not on one row at $label."
+        Assert ($a.CloseButton.Left -gt $left[2].Right -and ($row.ClientSize.Width - $a.CloseButton.Right) -le $a.CloseButton.Margin.Right) "Close is not at the right edge at $label."
+        if ($shotDir) {
+            $bmp = New-Object Drawing.Bitmap($a.Form.Width, $a.Form.Height)
+            $a.Form.DrawToBitmap($bmp, (New-Object Drawing.Rectangle(0, 0, $a.Form.Width, $a.Form.Height)))
+            $bmp.Save((Join-Path $shotDir "window-$label.png"), [Drawing.Imaging.ImageFormat]::Png)
+            $bmp.Dispose()
+        }
+    }
+    $a.Form.Hide()
     Assert (-not $a.Source.ReadOnly -and $a.Snapshot.ReadOnly -and $a.Notes.ReadOnly) 'Text area permissions incorrect.'
     Assert $a.Source.AcceptsReturn 'Source Enter must insert a newline instead of invoking the default button.'
     Assert ($a.FeatureLabel.Text.Contains('Features') -and -not $a.PromptInfo.Modular) 'Raw prompt notice missing.'

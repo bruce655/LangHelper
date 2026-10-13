@@ -60,6 +60,8 @@ Foundry 的 `1.5.1` 與上游 `2.0.0` 是分開演進的路線，因此日期較
 - Release 打包前執行 Bridge／UI／後端回歸測試，並包含中英文 README 與改版紀錄。
 - Bridge 心跳時間戳記正規化為 UTC，避免本地時區導致心跳誤判為過期。
 - 補強 Bridge owner.json 鎖機制，自動復原毀損或過期的鎖檔案，避免 VS Code 異常後無限期處於 Standby。
+- Copilot CLI 等待改為短間隔輪詢，取消或逾時時以 `taskkill /T` 終止完整行程樹，避免 UI 被阻塞與 node 孫行程殘留。
+- 系統匣切換 Provider 時保留自訂 VS Code 模型（僅切到 copilot-cli 時清空）；重新載入設定後同步更新 Provider 勾選狀態。
 - Bridge 寫入回應後再次確認取消標記，避免非同步寫入期間到達的取消請求遺留未處理回應。
 - 精簡 README，更新安裝、模型選擇、多視窗、外部 prompt、歷史與隱私說明。
 

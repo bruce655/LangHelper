@@ -245,13 +245,12 @@ function Complete-Translation {
             features = $job.Features; provider = $response.Provider; model = $response.ModelId
             modelVerified = $response.ModelVerified; elapsedMs = $job.Watch.ElapsedMilliseconds
         } | ConvertTo-Json -Depth 4 -Compress
-        try {
-            Add-Content -LiteralPath (Join-Path $script:DataDir 'history.jsonl') -Value $row -Encoding UTF8
-            [IO.File]::WriteAllText((Join-Path $script:DataDir 'last-result.txt'), $response.Content, $script:Utf8)
-        } catch {
-            # The translation already succeeded; a locked history file must not discard it.
-            Write-Log "could not persist result: $($_.Exception.Message)"
-        }
+        # The translation already succeeded; report each persistence failure on its own
+        # so a locked history file cannot leave an older last-result.txt behind.
+        try { Add-Content -LiteralPath (Join-Path $script:DataDir 'history.jsonl') -Value $row -Encoding UTF8 }
+        catch { Write-Log "could not write history: $($_.Exception.Message)" }
+        try { [IO.File]::WriteAllText((Join-Path $script:DataDir 'last-result.txt'), $response.Content, $script:Utf8) }
+        catch { Write-Log "could not write last result: $($_.Exception.Message)" }
         if ($Window.AutoCopy -and $split.Main) { Set-ClipboardQuietly $split.Main }
     } catch {
         Set-Status $Window $_.Exception.Message -ErrorStatus

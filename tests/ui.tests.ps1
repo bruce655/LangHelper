@@ -111,6 +111,7 @@ try {
     }
     $lockedHistory.Dispose()
     Assert ($a.Status.Text.StartsWith('Done') -and $script:CopiedText -eq 'translated: persist') 'Persistence failure must not fail a successful translation or skip auto-copy.'
+    Assert ([IO.File]::ReadAllText((Join-Path $testRoot 'last-result.txt')).Contains('translated: persist')) 'A locked history file must not prevent last-result.txt from updating.'
     Start-Translation $a
     $a.Form.Close()
     Assert ($script:Windows.Count -eq 1 -and -not $a.Job) 'Closing a window did not cancel its job.'

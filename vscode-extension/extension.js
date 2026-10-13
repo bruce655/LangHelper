@@ -15,6 +15,8 @@ const SCAN_INTERVAL_MS = 300;
 const HEARTBEAT_INTERVAL_MS = 15000;
 const STALE_REQUEST_MS = 5 * 60 * 1000;
 const STALE_LOCK_MS = 5000;
+const STALE_HEARTBEAT_MS = HEARTBEAT_INTERVAL_MS * 3;
+const CANCEL_MEMORY_MS = 2 * 60 * 1000;
 
 let log;
 let state = null;
@@ -115,6 +117,10 @@ async function handleRequestFile(fileName) {
 
     const id = String(req.id || path.basename(fileName, '.json'));
     await fsp.unlink(full).catch(() => {});
+    if (req.action !== 'cancel' && state.cancelled.delete(id)) {
+      log.appendLine(`[${new Date().toISOString()}] skipped ${id}: cancelled before it was dispatched`);
+      return;
+    }
     log.appendLine(`[${new Date().toISOString()}] request ${id} (${(req.messages || []).length} messages)`);
 
     let payload;
@@ -122,7 +128,8 @@ async function handleRequestFile(fileName) {
       if (req.action === 'cancel') {
         const cts = state.cancellations.get(req.targetId);
         if (cts) cts.cancel();
-        if (state.inFlight.has(`${req.targetId}.json`)) state.cancelled.add(req.targetId);
+        // Remember the cancel even if the target has not been picked up yet.
+        state.cancelled.set(req.targetId, Date.now());
         await fsp.rm(path.join(state.responseDir, `${req.targetId}.json`), { force: true });
         return;
       }
@@ -155,6 +162,9 @@ async function handleRequestFile(fileName) {
 
 async function scan() {
   if (!(await ensureLeader())) return;
+  for (const [id, at] of state.cancelled) {
+    if (Date.now() - at > CANCEL_MEMORY_MS) state.cancelled.delete(id);
+  }
   let files;
   try {
     files = await fsp.readdir(state.requestDir);
@@ -182,8 +192,12 @@ async function ensureLeader() {
         owner = JSON.parse(await fsp.readFile(lockPath, 'utf8'));
         if (!owner || typeof owner.pid !== 'number') throw new Error('Malformed lock format');
       } catch {
+        // A malformed lock can belong to a live owner, so only reclaim it when
+        // it is old and no instance is publishing a fresh heartbeat.
         const stat = await fsp.stat(lockPath).catch(() => null);
-        if (stat && Date.now() - stat.mtimeMs > STALE_LOCK_MS) {
+        const beat = await fsp.stat(path.join(state.root, 'heartbeat.json')).catch(() => null);
+        const beatFresh = beat && Date.now() - beat.mtimeMs < STALE_HEARTBEAT_MS;
+        if (stat && Date.now() - stat.mtimeMs > STALE_LOCK_MS && !beatFresh) {
           await fsp.unlink(lockPath).catch(() => {});
           try {
             handle = await fsp.open(lockPath, 'wx');
@@ -214,8 +228,26 @@ async function ensureLeader() {
   } finally { state.claiming = false; }
 }
 
+// A leader keeps owner.json pointing at itself: repair it if it was damaged,
+// and step down if another instance has legitimately taken over.
+async function verifyLock() {
+  const lockPath = path.join(state.root, 'owner.json');
+  let owner = null;
+  try { owner = JSON.parse(await fsp.readFile(lockPath, 'utf8')); } catch { /* missing or malformed */ }
+  if (owner && typeof owner.pid === 'number') {
+    if (owner.pid !== process.pid) {
+      state.lockHeld = false;
+      log.appendLine('Another VS Code window took over the bridge; this window is now on standby.');
+    }
+    return;
+  }
+  await writeAtomic(lockPath, JSON.stringify({ pid: process.pid })).catch(() => {});
+}
+
 async function writeHeartbeat() {
   if (!(await ensureLeader())) return;
+  await verifyLock();
+  if (!state.lockHeld) return;
   const payload = { pid: process.pid, updated: new Date().toISOString(), protocolVersion: 2 };
   await writeAtomic(path.join(state.root, 'heartbeat.json'), JSON.stringify(payload)).catch(() => {});
 }
@@ -231,7 +263,7 @@ async function activate(context) {
     responseDir: path.join(root, 'responses'),
     inFlight: new Set(),
     cancellations: new Map(),
-    cancelled: new Set(),
+    cancelled: new Map(),
     lockHeld: false,
     claiming: false,
   };

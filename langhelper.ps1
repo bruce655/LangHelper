@@ -15,7 +15,7 @@
       vscode      - the LangHelper Bridge extension inside a running VS Code,
                     using the Copilot models your VS Code is already signed in to.
                     Fastest and the cheapest against a Copilot subscription.
-      copilot-cli - `copilot -p`. Works with VS Code closed, but each call pays
+      copilot-cli - `copilot` with the prompt on stdin. Works with VS Code closed, but each call pays
                     for the agent's own system prompt (tens of seconds, ~10 AI
                     credits), so it is a fallback rather than a default.
 
@@ -24,8 +24,9 @@
     Empty string means Core-only (translate to English).
 
 .PARAMETER Model
-    For vscode, a Copilot model ID or family such as claude-sonnet-5.5. For copilot-cli, a
-    `copilot --model` value. Empty lets the provider choose.
+    For vscode, a Copilot model ID or family such as claude-sonnet-5.5; empty uses the
+    Bridge's langhelper.model setting, then its first available model. For copilot-cli, a
+    `copilot --model` value is required and an empty value is rejected.
 
 .PARAMETER PromptFile
     Optional path to an external prompt/spec file. If supplied and it exists,
@@ -226,7 +227,7 @@ function Invoke-CopilotCli {
     # The prompt goes through stdin (not -p) so large Source text cannot exceed
     # the Windows 32,767-character command-line limit.
     $cliArgs = @(
-        '--no-color', '--log-level', 'none',
+        '-s', '--no-color', '--log-level', 'none',
         '--disable-builtin-mcps', '--no-custom-instructions', '--no-ask-user',
         '--deny-tool', 'shell', '--deny-tool', 'write', '--deny-tool', 'read', '--deny-tool', 'url'
     )
@@ -283,10 +284,12 @@ exit $LASTEXITCODE
     }
 
     # Strip the CLI's trailing usage summary (Changes / AI Credits / Tokens / Resume).
+    # -s already suppresses the usage summary; this tolerates CLI versions that still print it
+    # (either "AI Credits 6.4" or "AI Credits: 6.4").
     $lines  = ($raw -replace "`r`n", "`n").Split("`n")
     $cut    = $lines.Count
     for ($i = $lines.Count - 1; $i -ge 0; $i--) {
-        if ($lines[$i] -match '^\s*(Changes|AI Credits|Tokens|Resume|Total duration|Session)\s') { $cut = $i }
+        if ($lines[$i] -match '^\s*(Changes|AI Credits|Tokens|Resume|Total duration|Session)(:|\s)') { $cut = $i }
         elseif ($lines[$i].Trim()) { break }
     }
     $content = ($lines[0..([Math]::Max($cut - 1, 0))] -join "`n").Trim()

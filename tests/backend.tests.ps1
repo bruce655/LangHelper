@@ -82,6 +82,15 @@ try {
     if ($shell.Streams.Error.Count) { throw ($shell.Streams.Error | Out-String) }
     Assert ($cliResult.Count -eq 1 -and $cliResult[0].Provider -eq 'copilot-cli' -and -not $cliResult[0].ModelVerified) 'CLI metadata must distinguish requested from verified model.'
     $shell.Dispose(); $shell = $null
+    # Older CLI builds print a colon-delimited usage footer; it must not leak into the result.
+    $env:LANGHELPER_TEST_FOOTER = 'colon'
+    $shell = [powershell]::Create()
+    [void]$shell.AddCommand((Join-Path $repo 'langhelper.ps1')).AddParameters($parameters)
+    $footerResult = @($shell.Invoke())
+    if ($shell.Streams.Error.Count) { throw ($shell.Streams.Error | Out-String) }
+    $env:LANGHELPER_TEST_FOOTER = $null
+    Assert ($footerResult.Count -eq 1 -and $footerResult[0].Content -eq 'CLI translated') 'Colon-delimited CLI footer leaked into the translation.'
+    $shell.Dispose(); $shell = $null
     # A prompt above the 32,767-character command-line limit must still reach a native CLI.
     $largeSource = ('large source ' * 4000) + $source
     [IO.File]::WriteAllText($inputFile, $largeSource)

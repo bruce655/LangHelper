@@ -111,15 +111,31 @@ test('bridge catalog, strict selection, metadata and cancellation', { timeout: 1
     assert.equal(calls, 2, 'cancel during model selection must not dispatch a completion');
     assert.equal(fs.existsSync(path.join(root, 'responses', 'selecting.json')), false);
 
-    // Test recovering malformed or empty owner lock after STALE_LOCK_MS
+    // A request cancelled before it is picked up must never reach the model.
+    await request('cancel-early', { action: 'cancel', targetId: 'early' });
+    await new Promise((r) => setTimeout(r, 150));
+    await request('early', { model: model.id, messages: [{ content: 'hello' }] });
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(calls, 2, 'a queued cancellation must prevent dispatch');
+    assert.equal(fs.existsSync(path.join(root, 'responses', 'early.json')), false);
+    assert.equal(fs.existsSync(path.join(root, 'requests', 'early.json')), false, 'a cancelled request file must be consumed');
+
+    // A damaged lock of a live owner (fresh heartbeat) must not be reclaimed.
     const lockPath = path.join(root, 'owner.json');
     await fsp.writeFile(lockPath, ''); // corrupted empty lock
-    // Initially not recovered because mtime is fresh
-    assert.equal(await standby.ensureLeader(), false);
-    // Backdate mtime past STALE_LOCK_MS (6 seconds ago)
     const past = new Date(Date.now() - 6000);
     await fsp.utimes(lockPath, past, past);
-    // Standby should recover the malformed lock and become leader
+    assert.equal(await standby.ensureLeader(), false, 'fresh heartbeat must prevent reclaiming a malformed lock');
+    // The live leader repairs its own lock on the next heartbeat.
+    await sandbox.writeHeartbeat();
+    assert.equal(JSON.parse(await fsp.readFile(lockPath, 'utf8')).pid, process.pid);
+    assert.equal(await standby.ensureLeader(), false);
+
+    // With no heartbeat (owner crashed before publishing), a stale malformed lock is recovered.
+    await fsp.rm(path.join(root, 'heartbeat.json'), { force: true });
+    await fsp.writeFile(lockPath, '');
+    assert.equal(await standby.ensureLeader(), false, 'a fresh malformed lock must wait for the grace period');
+    await fsp.utimes(lockPath, past, past);
     assert.equal(await standby.ensureLeader(), true);
     assert.equal(JSON.parse(await fsp.readFile(lockPath, 'utf8')).pid, process.pid);
   } finally {

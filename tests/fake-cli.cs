@@ -32,7 +32,18 @@ class FakeCli {
             Console.Error.WriteLine("CLI tool isolation was not preserved.");
             return 24;
         }
+        if (Array.IndexOf(args, "-s") < 0) {
+            Console.Error.WriteLine("The CLI must be started with --silent (-s).");
+            return 26;
+        }
         Console.WriteLine("CLI translated");
+        if (Environment.GetEnvironmentVariable("LANGHELPER_TEST_FOOTER") == "colon") {
+            Console.WriteLine();
+            Console.WriteLine("Changes: +0 -0");
+            Console.WriteLine("AI Credits: 1.2 (3s)");
+            Console.WriteLine("Total duration: 3s");
+            Console.WriteLine("Resume: copilot --resume=abc");
+        }
         return 0;
     }
 }

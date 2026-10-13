@@ -65,6 +65,7 @@ Foundry 的 `1.5.1` 與上游 `2.0.0` 是分開演進的路線，因此日期較
 - `Provider` 設定值不分大小寫並正規化為小寫，避免 `VSCODE` 等值造成視窗 Provider 為空。
 - 歷史與 last-result 寫入失敗（例如檔案被鎖定）不再把成功的翻譯標記為失敗，仍會顯示結果並自動複製。
 - Copilot CLI 的 prompt 一律以 stdin 傳入（含原生 `copilot.exe`），避免超過 Windows 32,767 字元命令列上限。
+- 修正 Copilot CLI 1.0.97 拒絕 `--deny-tool '*'` 的問題，改為明確拒絕 shell／write／read／url 工具；測試用假 CLI 同步驗證規則格式。
 - Bridge 寫入回應後再次確認取消標記，避免非同步寫入期間到達的取消請求遺留未處理回應。
 - 精簡 README，更新安裝、模型選擇、多視窗、外部 prompt、歷史與隱私說明。
 

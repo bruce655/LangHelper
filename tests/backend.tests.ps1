@@ -97,7 +97,7 @@ try {
     $env:PATH = "$shimDirectory;$testRoot;$previousPath"
     $shim = @'
 $ErrorActionPreference = 'Stop'
-if ($args -notcontains '--deny-tool' -or $args -notcontains '*') { throw 'Missing tool isolation.' }
+if ($args -notcontains '--deny-tool' -or $args -contains '*') { throw 'Missing tool isolation.' }
 $input | & (Join-Path (Split-Path -Parent $PSScriptRoot) 'copilot.exe') @args
 exit $LASTEXITCODE
 '@

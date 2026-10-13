@@ -10,7 +10,25 @@ class FakeCli {
             Console.Error.WriteLine("Prompt quoting was not preserved: " + String.Join(" | ", args));
             return 23;
         }
-        if (Array.IndexOf(args, "--deny-tool") < 0 || Array.IndexOf(args, "--allow-all-tools") >= 0) {
+        // Mirrors Copilot CLI 1.0.97, which rejects the '*' wildcard as a --deny-tool rule.
+        string[] denied = new string[0];
+        for (int i = 0; i < args.Length - 1; i++) {
+            if (args[i] == "--deny-tool") {
+                if (args[i + 1] == "*") {
+                    Console.Error.WriteLine("Invalid --deny-tool value. Error: Invalid rule format: *");
+                    return 25;
+                }
+                Array.Resize(ref denied, denied.Length + 1);
+                denied[denied.Length - 1] = args[i + 1];
+            }
+        }
+        foreach (string tool in new string[] { "shell", "write", "read", "url" }) {
+            if (Array.IndexOf(denied, tool) < 0) {
+                Console.Error.WriteLine("CLI tool isolation was not preserved.");
+                return 24;
+            }
+        }
+        if (Array.IndexOf(args, "--allow-all-tools") >= 0) {
             Console.Error.WriteLine("CLI tool isolation was not preserved.");
             return 24;
         }

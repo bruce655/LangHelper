@@ -228,7 +228,7 @@ function Invoke-CopilotCli {
     $cliArgs = @(
         '--no-color', '--log-level', 'none',
         '--disable-builtin-mcps', '--no-custom-instructions', '--no-ask-user',
-        '--deny-tool', '*'
+        '--deny-tool', 'shell', '--deny-tool', 'write', '--deny-tool', 'read', '--deny-tool', 'url'
     )
     if ($Model) { $cliArgs += @('--model', $Model) }
 

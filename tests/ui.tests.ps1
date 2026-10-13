@@ -138,6 +138,31 @@ try {
     }
     $lastHistory = (Get-Content -LiteralPath (Join-Path $testRoot 'history.jsonl') | Select-Object -Last 1) | ConvertFrom-Json
     Assert ($lastHistory.source -ceq $sourceWithWhitespace) 'History must retain exact Source whitespace.'
+    $a.Provider.SelectedItem = 'auto'
+    Stop-WindowJob $a 'CatalogJob'
+    $a.CatalogAvailable = $true
+    $a.Models = @([pscustomobject]@{ id = 'explicit-id'; name = 'Explicit'; family = 'explicit' })
+    [void]$a.Model.Items.Add('(Provider default)')
+    [void]$a.Model.Items.Add('Explicit')
+    $a.Model.SelectedIndex = 0
+    $rejected = $false
+    try { [void](Get-WindowModel $a) } catch { $rejected = $_.Exception.Message.Contains('Auto requires') }
+    Assert $rejected 'Auto must reject Provider default when a catalog is loaded.'
+    $a.Model.SelectedIndex = 1
+    Assert ((Get-WindowModel $a) -eq 'explicit-id') 'Auto must still accept an explicit model.'
+    $script:ProviderMenu = New-Object Windows.Forms.ToolStripMenuItem 'Provider'
+    foreach ($provider in @('vscode', 'copilot-cli', 'auto')) {
+        $item = New-Object Windows.Forms.ToolStripMenuItem $provider
+        $item.Tag = $provider
+        [void]$script:ProviderMenu.DropDownItems.Add($item)
+    }
+    $a.Form.Show()
+    [Windows.Forms.Application]::DoEvents()
+    $a.CloseButton.Parent.Controls[0].Controls[2].PerformClick()
+    Assert ($script:Config.Provider -eq 'auto' -and (Read-LangHelperConfig $configPath).Provider -eq 'auto') 'Save as defaults must persist the selected provider.'
+    Assert ($script:ProviderMenu.DropDownItems[2].Checked -and -not $script:ProviderMenu.DropDownItems[0].Checked) 'Save as defaults must synchronize tray provider checks.'
+    $script:ProviderMenu.Dispose()
+    Remove-Variable ProviderMenu -Scope Script
     $a.Source.Text = " `t`r`n"
     Start-Translation $a
     Assert (-not $a.Job -and $a.Status.Text -eq 'Source is empty.') 'Whitespace-only Source must be rejected.'

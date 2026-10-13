@@ -29,6 +29,11 @@ jobs:
           if ($tag -notmatch $semver) {
             throw "Release tag '$tag' must look like v1.2.3 or v1.2.3-beta.1."
           }
+          $coreVersion = [regex]::Match($tag, '^v(\d+\.\d+\.\d+)').Groups[1].Value
+          $manifest = Get-Content .\vscode-extension\package.json -Raw | ConvertFrom-Json
+          if ($coreVersion -cne $manifest.version) {
+            throw "Release tag '$tag' does not match Bridge manifest version '$($manifest.version)'."
+          }
 
       - name: Validate PowerShell and prompt assembly
         shell: pwsh

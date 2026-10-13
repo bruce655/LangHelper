@@ -50,6 +50,9 @@ Foundry 的 `1.5.1` 與上游 `2.0.0` 是分開演進的路線，因此日期較
 - **Save as defaults** 儲存目前視窗的 Provider／模型／Features，作為新視窗預設；保留範本註解。
 
 ### 修正與驗證
+- `auto` 必須指定明確模型 ID，避免 Provider default 空模型導致 CLI 回退必定失敗；儲存預設值後同步系統匣 Provider 勾選。
+- 發布前核對 tag 核心版號與 Bridge manifest，避免套件與擴充功能版號不一致。
+- CMD 啟動器分離 PowerShell console，避免持續顯示終端機工作列圖示；直接 PowerShell 啟動保留除錯 console。
 - 原文入口與 prompt 組合保留開頭縮排、尾端空白及空白行；純空白輸入仍會拒絕，快捷鍵的字數限制與警告維持不變。
 - Bridge 加入呼叫端 UTC `expiresAt` 期限，送出模型前重新檢查；舊請求沿用五分鐘檔案年齡限制，避免重啟後補送過期請求。
 - 修正 Windows PowerShell 5.1 的非 ASCII 標點編碼問題，PowerShell 7 啟動時轉用 Windows PowerShell 5.1。

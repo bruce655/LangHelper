@@ -27,6 +27,7 @@
     For vscode, a Copilot model ID or family such as claude-sonnet-5.5; empty uses the
     Bridge's langhelper.model setting, then its first available model. For copilot-cli, a
     `copilot --model` value is required and an empty value is rejected.
+    auto also requires an explicit model ID for CLI fallback.
 
 .PARAMETER PromptFile
     Optional path to an external prompt/spec file. If supplied and it exists,
@@ -66,6 +67,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Provider -eq 'auto' -and [string]::IsNullOrWhiteSpace($Model)) {
+    throw 'Auto requires an explicit model ID for CLI fallback. Use vscode for Provider default.'
+}
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $scriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path

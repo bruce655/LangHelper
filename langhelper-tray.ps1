@@ -3,6 +3,7 @@
 param(
     [string]$ConfigFile = '',
     [switch]$Translate,
+    [switch]$DetachConsole,
     [switch]$TestMode
 )
 
@@ -11,9 +12,26 @@ if ($PSVersionTable.PSEdition -eq 'Core' -or [Threading.Thread]::CurrentThread.G
     $arguments = @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $PSCommandPath))
     if ($ConfigFile) { $arguments += @('-ConfigFile', ('"{0}"' -f $ConfigFile)) }
     if ($Translate) { $arguments += '-Translate' }
+    if ($DetachConsole) { $arguments += '-DetachConsole' }
     if ($TestMode) { throw 'UI tests must run in Windows PowerShell 5.1 with -STA.' }
     Start-Process "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList $arguments
     return
+}
+
+if ($DetachConsole -and -not $TestMode) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace LangHelper {
+    public static class ConsoleHost {
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool FreeConsole();
+    }
+}
+'@
+    if (-not [LangHelper.ConsoleHost]::FreeConsole()) {
+        throw "Could not detach the launcher console: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+    }
 }
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -46,6 +64,14 @@ function Write-Log {
 
 function Save-Config {
     Save-LangHelperConfig $script:Config $script:IniPath (Join-Path $script:Root 'langhelper.ini.example')
+    Sync-ProviderMenu
+}
+
+function Sync-ProviderMenu {
+    if (-not (Get-Variable ProviderMenu -Scope Script -ErrorAction SilentlyContinue)) { return }
+    foreach ($item in $script:ProviderMenu.DropDownItems) {
+        $item.Checked = ($item.Tag -eq $script:Config.Provider)
+    }
 }
 
 function Set-BoxText {
@@ -181,6 +207,9 @@ function Get-WindowModel {
         return [string]$Window.VSCodeModel
     }
     if ($Window.Model.SelectedIndex -lt 0) { throw 'Select an available VS Code model, or refresh the model list.' }
+    if ($Window.Provider.SelectedItem -eq 'auto' -and $Window.Model.SelectedIndex -eq 0) {
+        throw 'Auto requires an explicit model ID for CLI fallback. Select a model, or use vscode for Provider default.'
+    }
     if ($Window.Model.SelectedIndex -eq 0) { $Window.VSCodeModel = ''; return '' }
     $model = $Window.Models[$Window.Model.SelectedIndex - 1]
     $Window.VSCodeModel = $model.id
@@ -595,7 +624,6 @@ namespace LangHelper {
                 if ($s.Tag -eq 'copilot-cli') { $script:Config.Model = '' }
                 elseif ($previous -eq 'copilot-cli' -or -not [string]$script:Config.Model) { $script:Config.Model = 'claude-sonnet-5.5' }
                 Save-Config
-                foreach ($sibling in $s.Owner.Items) { $sibling.Checked = ($sibling.Tag -eq $s.Tag) }
             } catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'LangHelper') | Out-Null }
         })
         [void]$providerMenu.DropDownItems.Add($item)
@@ -620,7 +648,7 @@ namespace LangHelper {
     $reload.Add_Click({
         try {
             $script:Config = Read-LangHelperConfig $script:IniPath
-            foreach ($providerItem in $script:ProviderMenu.DropDownItems) { $providerItem.Checked = ($providerItem.Tag -eq $script:Config.Provider) }
+            Sync-ProviderMenu
             Write-Log 'Config reloaded for new windows.'
         }
         catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Invalid LangHelper settings') | Out-Null }

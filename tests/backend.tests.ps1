@@ -47,6 +47,16 @@ try {
     Assert ($result.Count -eq 1 -and $result[0].ModelId -eq 'actual-sonnet-id' -and $result[0].ModelVerified) 'Backend lost actual model metadata.'
     Assert ([IO.File]::ReadAllText($outputFile) -eq 'verified output') 'Output file compatibility failed.'
     $shell.Dispose(); $shell = $null
+    $emptyAuto = $parameters.Clone()
+    $emptyAuto.Provider = 'auto'
+    $emptyAuto.Model = ''
+    $shell = [powershell]::Create()
+    [void]$shell.AddCommand((Join-Path $repo 'langhelper.ps1')).AddParameters($emptyAuto)
+    $autoError = ''
+    try { [void]$shell.Invoke() } catch { $autoError = $_.Exception.Message }
+    $autoError += $shell.Streams.Error | Out-String
+    Assert ($autoError.Contains('Auto requires an explicit model ID')) 'Direct backend auto must reject an empty model before provider dispatch.'
+    $shell.Dispose(); $shell = $null
     foreach ($promptPath in @($raw, (Join-Path $repo 'prompt.md'))) {
         & (Join-Path $repo 'langhelper.ps1') -PromptFile $promptPath -Features TECHNICAL -InputFile $inputFile -OutputFile $outputFile -DryRun
         Assert ([IO.File]::ReadAllText($outputFile).Contains("<clipboard>`n$source`n</clipboard>")) 'Raw/modular prompt must preserve exact source text.'

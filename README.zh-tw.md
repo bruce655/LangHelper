@@ -189,6 +189,10 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\langhelper-tray.p
 若要重新啟動，先從系統匣選擇 **Exit**，再啟動 [LangHelper.cmd](LangHelper.cmd)。
 關閉翻譯視窗不等於結束系統匣程式。
 
+CMD 啟動器使用 `-DetachConsole` 分離 PowerShell console，搭配隱藏視窗，
+避免持續顯示終端機工作列圖示。直接從 PowerShell 啟動仍保留 console 方便除錯，
+翻譯視窗不會被隱藏。
+
 ### 觸發原理
 
 程式不使用鍵盤 hook。系統匣程式透過 `AddClipboardFormatListener` 註冊 Win32 剪貼簿監聽，
@@ -279,6 +283,9 @@ VS Code 下拉選單顯示 `vscode.lm.selectChatModels({vendor:'copilot'})`
 **Provider default** 不明確指定模型，而使用擴充功能的 `langhelper.model`
 設定（預設也為 Sonnet 5.5）。擴充功能指定的預設模型不可用時仍會報錯。
 清空此 VS Code 設定後，才會使用第一個可用模型。
+
+**Provider default** 僅適用於 `vscode`。`auto` 必須指定模型 ID，
+避免空模型讓 CLI 回退必定失敗；指定 ID 仍需同時受兩個 Provider 支援。
 
 目前安裝的 CLI 版本沒有已驗證的機器可讀模型清單。
 CLI 模型欄位接受手動輸入的 CLI ID，不會套用 VS Code 清單。
@@ -380,3 +387,4 @@ git push origin v2.1.0
 Release workflow 會驗證 tag、重新執行檢查、打包腳本與 Bridge、
 產生 SHA-256 校驗值，以及建立 GitHub release notes。
 像 `v2.1.0-beta.1` 的預先發行 tag 會自動標示為 GitHub pre-release。
+Tag 的核心版號必須與 Bridge manifest 版號一致，不一致會在打包前中止。

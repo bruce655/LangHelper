@@ -206,6 +206,10 @@ WinForms compilation differences. To restart, choose tray **Exit**, then launch
 [LangHelper.cmd](LangHelper.cmd) again. Closing a translation window is not the
 same as exiting the tray application.
 
+The CMD launcher passes `-DetachConsole` to detach its PowerShell console as
+well as hide it, avoiding a persistent terminal taskbar icon. Direct PowerShell
+launches retain their console for diagnostics; translation windows remain visible.
+
 ### How the trigger works
 
 There is no keyboard hook. The tray app registers a Win32 clipboard listener
@@ -302,6 +306,10 @@ model explicitly. The status reports the returned model ID.
 `langhelper.model` setting (also Sonnet 5.5 by default). An unavailable explicit
 extension default is still an error. Clearing that VS Code setting allows the
 first available model.
+
+Provider default is supported only by `vscode`. `auto` requires an explicit
+model ID so CLI fallback is not guaranteed to fail for an empty model.
+An explicit ID still needs to be supported by both providers.
 
 CLI has no verified machine-readable catalog in the installed version. Its
 model field accepts a manually entered CLI ID, never a copied VS Code list.
@@ -412,3 +420,5 @@ The release workflow validates the tag, re-runs the checks, packages the scripts
 and the bridge extension, generates a SHA-256 checksum, and creates GitHub
 release notes. Pre-release tags such as `v2.1.0-beta.1` are automatically marked
 as GitHub pre-releases.
+The tag's core version must match the Bridge manifest version; mismatches stop
+the workflow before packaging.

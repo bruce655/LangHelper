@@ -223,14 +223,17 @@ function Invoke-CopilotCli {
 
     # The CLI is an agent, so tools, MCP servers and repo instructions are all
     # turned off: LangHelper only needs one text completion.
+    # The prompt goes through stdin (not -p) so large Source text cannot exceed
+    # the Windows 32,767-character command-line limit.
     $cliArgs = @(
-        '-p', $prompt,
         '--no-color', '--log-level', 'none',
         '--disable-builtin-mcps', '--no-custom-instructions', '--no-ask-user',
         '--deny-tool', '*'
     )
     if ($Model) { $cliArgs += @('--model', $Model) }
 
+    $promptFile = Join-Path $work 'prompt.txt'
+    [IO.File]::WriteAllText($promptFile, $prompt, $utf8NoBom)
     [IO.File]::WriteAllText((Join-Path $work 'args.json'), (@{ executable = $copilot.Source; arguments = $cliArgs } | ConvertTo-Json -Depth 4), $utf8NoBom)
     $command = @'
 $ErrorActionPreference = 'Stop'
@@ -239,8 +242,7 @@ $OutputEncoding = [Text.UTF8Encoding]::new($false)
 $config = [IO.File]::ReadAllText((Join-Path (Get-Location) 'args.json')) | ConvertFrom-Json
 $arguments = @($config.arguments)
 # Script shims may reparse native arguments; pipe the prompt as UTF-8 instead.
-$prompt = $arguments[1]
-$arguments = @($arguments | Select-Object -Skip 2)
+$prompt = [IO.File]::ReadAllText((Join-Path (Get-Location) 'prompt.txt'))
 $prompt | & $config.executable @arguments
 exit $LASTEXITCODE
 '@
@@ -249,12 +251,14 @@ exit $LASTEXITCODE
     try {
         $executable = $copilot.Source
         $arguments = ($cliArgs | ForEach-Object { ConvertTo-LangHelperNativeArgument $_ }) -join ' '
+        $startParameters = @{ RedirectStandardInput = $promptFile }
         if ([IO.Path]::GetExtension($executable) -ne '.exe') {
             $executable = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
             $arguments = "-NoProfile -EncodedCommand $encoded"
+            $startParameters = @{}
         }
         $proc = Start-Process -FilePath $executable -ArgumentList $arguments -WorkingDirectory $work `
-            -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr @startParameters
         $processHandle = $proc.Handle
         # Short waits let a pipeline stop reach the finally block promptly.
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)

@@ -82,6 +82,16 @@ try {
     if ($shell.Streams.Error.Count) { throw ($shell.Streams.Error | Out-String) }
     Assert ($cliResult.Count -eq 1 -and $cliResult[0].Provider -eq 'copilot-cli' -and -not $cliResult[0].ModelVerified) 'CLI metadata must distinguish requested from verified model.'
     $shell.Dispose(); $shell = $null
+    # A prompt above the 32,767-character command-line limit must still reach a native CLI.
+    $largeSource = ('large source ' * 4000) + $source
+    [IO.File]::WriteAllText($inputFile, $largeSource)
+    $shell = [powershell]::Create()
+    [void]$shell.AddCommand((Join-Path $repo 'langhelper.ps1')).AddParameters($parameters)
+    $largeResult = @($shell.Invoke())
+    if ($shell.Streams.Error.Count) { throw ($shell.Streams.Error | Out-String) }
+    Assert ($largeResult.Count -eq 1 -and $largeResult[0].Content -eq 'CLI translated') 'A large prompt must be passed to the native CLI through stdin.'
+    $shell.Dispose(); $shell = $null
+    [IO.File]::WriteAllText($inputFile, $source)
     $shimDirectory = Join-Path $testRoot 'shim'
     [void][IO.Directory]::CreateDirectory($shimDirectory)
     $env:PATH = "$shimDirectory;$testRoot;$previousPath"

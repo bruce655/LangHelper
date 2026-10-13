@@ -27,6 +27,7 @@ function Read-LangHelperConfig {
             }
         }
     }
+    $cfg.Provider = $cfg.Provider.ToLowerInvariant()
     if ($cfg.Provider -notin @('vscode', 'auto', 'copilot-cli')) { throw 'Provider must be vscode, auto or copilot-cli.' }
     if ($cfg.Model.Contains(',')) { throw 'Model must contain one model ID or family, not a comma-separated list.' }
     foreach ($key in @('DoubleCopyMs', 'MinChars', 'MaxChars', 'TimeoutSec')) {

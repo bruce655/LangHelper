@@ -26,6 +26,11 @@ try {
     $cfg.Model = 'claude-sonnet-5.5'
     Save-LangHelperConfig $cfg $configPath (Join-Path $repo 'langhelper.ini.example')
     Assert ([IO.File]::ReadAllText($configPath).Contains('; Provider for new windows')) 'Config comments were lost.'
+    $cfg.Provider = 'VSCODE'
+    Save-LangHelperConfig $cfg $configPath (Join-Path $repo 'langhelper.ini.example')
+    Assert ((Read-LangHelperConfig $configPath).Provider -eq 'vscode') 'Provider case must be normalized.'
+    $cfg.Provider = 'vscode'
+    Save-LangHelperConfig $cfg $configPath (Join-Path $repo 'langhelper.ini.example')
     $split = Split-LangHelperResult ('Before' + "`n" + '```text' + "`nhello`n" + '```' + "`nnotes")
     Assert ($split.Main -eq 'hello' -and $split.Notes.Contains('notes')) 'Fenced output split failed.'
     $split = Split-LangHelperResult "## English`nHello`n## Notes`nExplanation"
@@ -94,6 +99,18 @@ try {
     Assert ($a.Status.Text.Contains('verified-sonnet')) 'Actual model is not displayed.'
     $history = @(Get-Content -LiteralPath (Join-Path $testRoot 'history.jsonl') | ForEach-Object { $_ | ConvertFrom-Json })
     Assert ($history.Count -eq 2 -and $history[0].model -eq 'verified-sonnet') 'History metadata is incorrect.'
+    $lockedHistory = [IO.File]::Open((Join-Path $testRoot 'history.jsonl'), 'Open', 'ReadWrite', 'None')
+    $script:CopiedText = ''
+    $a.Source.Text = 'persist'
+    Start-Translation $a
+    $deadline = (Get-Date).AddSeconds(10)
+    while ($a.Job -and (Get-Date) -lt $deadline) {
+        Complete-Translation $a
+        [Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 30
+    }
+    $lockedHistory.Dispose()
+    Assert ($a.Status.Text.StartsWith('Done') -and $script:CopiedText -eq 'translated: persist') 'Persistence failure must not fail a successful translation or skip auto-copy.'
     Start-Translation $a
     $a.Form.Close()
     Assert ($script:Windows.Count -eq 1 -and -not $a.Job) 'Closing a window did not cancel its job.'

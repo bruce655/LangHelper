@@ -110,6 +110,18 @@ test('bridge catalog, strict selection, metadata and cancellation', { timeout: 1
     await new Promise((r) => setTimeout(r, 100));
     assert.equal(calls, 2, 'cancel during model selection must not dispatch a completion');
     assert.equal(fs.existsSync(path.join(root, 'responses', 'selecting.json')), false);
+
+    // Test recovering malformed or empty owner lock after STALE_LOCK_MS
+    const lockPath = path.join(root, 'owner.json');
+    await fsp.writeFile(lockPath, ''); // corrupted empty lock
+    // Initially not recovered because mtime is fresh
+    assert.equal(await standby.ensureLeader(), false);
+    // Backdate mtime past STALE_LOCK_MS (6 seconds ago)
+    const past = new Date(Date.now() - 6000);
+    await fsp.utimes(lockPath, past, past);
+    // Standby should recover the malformed lock and become leader
+    assert.equal(await standby.ensureLeader(), true);
+    assert.equal(JSON.parse(await fsp.readFile(lockPath, 'utf8')).pid, process.pid);
   } finally {
     for (const disposable of standbySubscriptions) disposable.dispose();
     for (const disposable of subscriptions) disposable.dispose();

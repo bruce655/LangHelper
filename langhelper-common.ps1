@@ -104,7 +104,7 @@ function Invoke-LangHelperBridge {
     $hb = Join-Path $root 'heartbeat.json'
     if (-not (Test-Path -LiteralPath $hb)) { throw 'LangHelper Bridge is offline. Start VS Code and test the Copilot connection.' }
     $heartbeat = [IO.File]::ReadAllText($hb) | ConvertFrom-Json
-    if ([datetime]$heartbeat.updated -lt (Get-Date).ToUniversalTime().AddSeconds(-90)) { throw 'LangHelper Bridge heartbeat is stale. Reload VS Code.' }
+    if (([datetime]$heartbeat.updated).ToUniversalTime() -lt (Get-Date).ToUniversalTime().AddSeconds(-90)) { throw 'LangHelper Bridge heartbeat is stale. Reload VS Code.' }
     if ($heartbeat.protocolVersion -ne 2) { throw 'Bridge update required. Run install.ps1 -NoStartup, then Developer: Reload Window in VS Code.' }
     $id = [guid]::NewGuid().ToString('n')
     $Payload.id = $id

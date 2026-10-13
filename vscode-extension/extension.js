@@ -14,6 +14,7 @@ const path = require('path');
 const SCAN_INTERVAL_MS = 300;
 const HEARTBEAT_INTERVAL_MS = 15000;
 const STALE_REQUEST_MS = 5 * 60 * 1000;
+const STALE_LOCK_MS = 5000;
 
 let log;
 let state = null;
@@ -140,9 +141,13 @@ async function handleRequestFile(fileName) {
       log.appendLine(`[${new Date().toISOString()}] failed ${id}: ${payload.error}`);
     }
     if (state.cancelled.delete(id)) return;
-    await writeAtomic(path.join(state.responseDir, `${id}.json`), JSON.stringify(payload)).catch((e) =>
+    const responseFile = path.join(state.responseDir, `${id}.json`);
+    await writeAtomic(responseFile, JSON.stringify(payload)).catch((e) =>
       log.appendLine(`[${new Date().toISOString()}] could not write response for ${id}: ${e}`)
     );
+    if (state.cancelled.delete(id)) {
+      await fsp.rm(responseFile, { force: true }).catch(() => {});
+    }
   } finally {
     state.inFlight.delete(fileName);
   }
@@ -173,13 +178,29 @@ async function ensureLeader() {
     } catch (err) {
       if (err.code !== 'EEXIST') throw err;
       let owner;
-      try { owner = JSON.parse(await fsp.readFile(lockPath, 'utf8')); }
-      catch { return false; }
-      try { process.kill(owner.pid, 0); return false; }
-      catch (e) {
-        if (e.code !== 'ESRCH') return false;
-        await fsp.unlink(lockPath);
-        return false;
+      try {
+        owner = JSON.parse(await fsp.readFile(lockPath, 'utf8'));
+        if (!owner || typeof owner.pid !== 'number') throw new Error('Malformed lock format');
+      } catch {
+        const stat = await fsp.stat(lockPath).catch(() => null);
+        if (stat && Date.now() - stat.mtimeMs > STALE_LOCK_MS) {
+          await fsp.unlink(lockPath).catch(() => {});
+          try {
+            handle = await fsp.open(lockPath, 'wx');
+          } catch {
+            return false;
+          }
+        } else {
+          return false;
+        }
+      }
+      if (!handle) {
+        try { process.kill(owner.pid, 0); return false; }
+        catch (e) {
+          if (e.code !== 'ESRCH') return false;
+          await fsp.unlink(lockPath);
+          return false;
+        }
       }
     }
     try { await handle.writeFile(JSON.stringify({ pid: process.pid })); }

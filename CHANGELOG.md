@@ -58,6 +58,9 @@ Foundry 的 `1.5.1` 與上游 `2.0.0` 是分開演進的路線，因此日期較
 - CLI 啟動腳本使用 UTF-8 標準輸入保留多行、引號與特殊字元；prompt reminder 保留條件式輸出規則。
 - 新增 Bridge、WinForms UI、INI、後端與 CLI 參數回歸測試；更新 CI 與 release 打包檔案清單。
 - Release 打包前執行 Bridge／UI／後端回歸測試，並包含中英文 README 與改版紀錄。
+- Bridge 心跳時間戳記正規化為 UTC，避免本地時區導致心跳誤判為過期。
+- 補強 Bridge owner.json 鎖機制，自動復原毀損或過期的鎖檔案，避免 VS Code 異常後無限期處於 Standby。
+- Bridge 寫入回應後再次確認取消標記，避免非同步寫入期間到達的取消請求遺留未處理回應。
 - 精簡 README，更新安裝、模型選擇、多視窗、外部 prompt、歷史與隱私說明。
 
 ## 1.5.1 — 2026-09-14：Foundry 登入設定隔離

@@ -49,6 +49,21 @@ try {
     Assert ($timedOut -and $watch.Elapsed.TotalSeconds -lt 2.5) 'Bridge timeout threshold failed.'
     $cancels = @(Get-ChildItem -LiteralPath (Join-Path $root 'requests') -Filter '*-cancel.json')
     Assert ($cancels.Count -eq 1) 'Timeout did not send cancellation.'
+
+    # Heartbeat UTC normalization test
+    # A fresh UTC timestamp formatted with 'Z' must not be rejected even if local timezone is non-UTC
+    [IO.File]::WriteAllText((Join-Path $root 'heartbeat.json'), (@{ updated = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ'); protocolVersion = 2 } | ConvertTo-Json))
+    $utcCheckPassed = $false
+    try {
+        # With a fresh heartbeat, Invoke-LangHelperBridge will proceed past the heartbeat check to request writing
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        try { [void](Invoke-LangHelperBridge @{ action = 'models' } -TimeoutSec 1) } catch {
+            if ($_.Exception.Message.Contains('within 1')) { $utcCheckPassed = $true }
+            else { throw $_ }
+        }
+    } catch { throw }
+    Assert $utcCheckPassed 'Heartbeat with UTC Z format failed fresh check.'
+
     $parameters.PromptFile = Join-Path $testRoot 'missing.md'
     $shell = [powershell]::Create()
     [void]$shell.AddCommand((Join-Path $repo 'langhelper.ps1')).AddParameters($parameters)

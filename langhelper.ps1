@@ -283,16 +283,8 @@ exit $LASTEXITCODE
         Remove-Item -LiteralPath $work -Recurse -Force
     }
 
-    # Strip the CLI's trailing usage summary (Changes / AI Credits / Tokens / Resume).
-    # -s already suppresses the usage summary; this tolerates CLI versions that still print it
-    # (either "AI Credits 6.4" or "AI Credits: 6.4").
-    $lines  = ($raw -replace "`r`n", "`n").Split("`n")
-    $cut    = $lines.Count
-    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
-        if ($lines[$i] -match '^\s*(Changes|AI Credits|Tokens|Resume|Total duration|Session)(:|\s)') { $cut = $i }
-        elseif ($lines[$i].Trim()) { break }
-    }
-    $content = ($lines[0..([Math]::Max($cut - 1, 0))] -join "`n").Trim()
+    # --silent supplies response-only output; guessing footer labels can delete real translations.
+    $content = $raw.Trim()
     if (-not $content) { throw "The Copilot CLI returned no text.`n$raw" }
     return [pscustomobject]@{ content = $content; provider = 'copilot-cli'; modelId = $Model; modelName = $Model; modelVerified = $false }
 }

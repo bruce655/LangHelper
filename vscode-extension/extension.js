@@ -10,6 +10,7 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const os = require('os');
 const path = require('path');
+const { randomUUID } = require('crypto');
 
 const SCAN_INTERVAL_MS = 300;
 const HEARTBEAT_INTERVAL_MS = 15000;
@@ -177,7 +178,8 @@ async function scan() {
 }
 
 async function ensureLeader() {
-  if (state.lockHeld) return true;
+  if (state.disposed) return false;
+  if (state.lockHeld) return verifyLock();
   if (state.claiming) return false;
   state.claiming = true;
   const lockPath = path.join(state.root, 'owner.json');
@@ -217,9 +219,13 @@ async function ensureLeader() {
         }
       }
     }
-    try { await handle.writeFile(JSON.stringify({ pid: process.pid })); }
+    try { await handle.writeFile(JSON.stringify({ pid: process.pid, ownerId: state.ownerId })); }
     finally { await handle.close(); }
     state.lockHeld = true;
+    if (state.disposed) {
+      releaseOwnership();
+      return false;
+    }
     log.appendLine('This VS Code window owns the bridge; other windows stay on standby.');
     return true;
   } catch (err) {
@@ -230,26 +236,62 @@ async function ensureLeader() {
 
 // A leader keeps owner.json pointing at itself: repair it if it was damaged,
 // and step down if another instance has legitimately taken over.
-async function verifyLock() {
+function verifyLock() {
   const lockPath = path.join(state.root, 'owner.json');
   let owner = null;
-  try { owner = JSON.parse(await fsp.readFile(lockPath, 'utf8')); } catch { /* missing or malformed */ }
+  try { owner = JSON.parse(fs.readFileSync(lockPath, 'utf8')); }
+  catch (err) {
+    if (!(err instanceof SyntaxError) && err.code !== 'ENOENT') {
+      log.appendLine(`Could not verify bridge ownership: ${err.message}`);
+      state.lockHeld = false;
+      return false;
+    }
+  }
   if (owner && typeof owner.pid === 'number') {
-    if (owner.pid !== process.pid) {
+    if (owner.ownerId !== state.ownerId || owner.pid !== process.pid) {
       state.lockHeld = false;
       log.appendLine('Another VS Code window took over the bridge; this window is now on standby.');
     }
-    return;
+    return state.lockHeld;
   }
-  await writeAtomic(lockPath, JSON.stringify({ pid: process.pid })).catch(() => {});
+  try {
+    fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, ownerId: state.ownerId }));
+    return true;
+  } catch (err) {
+    log.appendLine(`Could not repair bridge ownership: ${err.message}`);
+    state.lockHeld = false;
+    return false;
+  }
+}
+
+function releaseOwnership() {
+  // Never repair a lock during disposal: it may already belong to a successor.
+  for (const name of ['heartbeat.json', 'owner.json']) {
+    const file = path.join(state.root, name);
+    try {
+      const owner = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (owner.ownerId === state.ownerId && owner.pid === process.pid) {
+        fs.rmSync(file, { force: true });
+      }
+    } catch (err) {
+      if (err.code !== 'ENOENT') log.appendLine(`Could not release ${name}: ${err.message}`);
+    }
+  }
+  state.lockHeld = false;
 }
 
 async function writeHeartbeat() {
   if (!(await ensureLeader())) return;
-  await verifyLock();
-  if (!state.lockHeld) return;
-  const payload = { pid: process.pid, updated: new Date().toISOString(), protocolVersion: 2 };
-  await writeAtomic(path.join(state.root, 'heartbeat.json'), JSON.stringify(payload)).catch(() => {});
+  if (state.disposed || !verifyLock()) return;
+  const payload = { pid: process.pid, ownerId: state.ownerId, updated: new Date().toISOString(), protocolVersion: 2 };
+  const target = path.join(state.root, 'heartbeat.json');
+  const temp = `${target}.${state.ownerId}.tmp`;
+  try {
+    fs.writeFileSync(temp, JSON.stringify(payload), 'utf8');
+    fs.renameSync(temp, target);
+  } catch (err) {
+    log.appendLine(`Could not publish bridge heartbeat: ${err.message}`);
+  }
 }
 
 async function activate(context) {
@@ -266,6 +308,8 @@ async function activate(context) {
     cancelled: new Map(),
     lockHeld: false,
     claiming: false,
+    ownerId: randomUUID(),
+    disposed: false,
   };
   await fsp.mkdir(state.requestDir, { recursive: true });
   await fsp.mkdir(state.responseDir, { recursive: true });
@@ -276,13 +320,11 @@ async function activate(context) {
   const poll = setInterval(() => void scan(), SCAN_INTERVAL_MS);
   context.subscriptions.push({
     dispose: () => {
+      state.disposed = true;
       clearInterval(heartbeat);
       clearInterval(poll);
       for (const cts of state.cancellations.values()) cts.cancel();
-      if (state.lockHeld) {
-        fs.rmSync(path.join(state.root, 'heartbeat.json'), { force: true });
-        fs.rmSync(path.join(state.root, 'owner.json'), { force: true });
-      }
+      releaseOwnership();
     },
   });
 

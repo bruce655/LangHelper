@@ -112,6 +112,19 @@ try {
     $lockedHistory.Dispose()
     Assert ($a.Status.Text.StartsWith('Done') -and $script:CopiedText -eq 'translated: persist') 'Persistence failure must not fail a successful translation or skip auto-copy.'
     Assert ([IO.File]::ReadAllText((Join-Path $testRoot 'last-result.txt')).Contains('translated: persist')) 'A locked history file must not prevent last-result.txt from updating.'
+    function Set-ClipboardQuietly { param([string]$Text) throw 'Clipboard is busy (test).' }
+    $a.Source.Text = 'clipboard'
+    Start-Translation $a
+    $deadline = (Get-Date).AddSeconds(10)
+    while ($a.Job -and (Get-Date) -lt $deadline) {
+        Complete-Translation $a
+        [Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 30
+    }
+    Assert ($a.Status.Text.StartsWith('Done') -and $a.Status.Text.Contains('Auto-copy failed')) 'Clipboard failure must remain a successful translation with a warning.'
+    Assert ($a.Result.Text -eq 'translated: clipboard') 'Clipboard failure lost the translation.'
+    Assert ([IO.File]::ReadAllText((Join-Path $testRoot 'last-result.txt')).Contains('translated: clipboard')) 'Clipboard failure lost the persisted result.'
+    function Set-ClipboardQuietly { param([string]$Text) $script:CopiedText = $Text }
     Start-Translation $a
     $a.Form.Close()
     Assert ($script:Windows.Count -eq 1 -and -not $a.Job) 'Closing a window did not cancel its job.'

@@ -121,7 +121,9 @@ test('bridge catalog, strict selection, metadata and cancellation', { timeout: 1
     assert.equal(fs.existsSync(path.join(root, 'requests', 'early.json')), false, 'a cancelled request file must be consumed');
 
     // A damaged lock of a live owner (fresh heartbeat) must not be reclaimed.
+    await standby.module.exports.activate({ subscriptions: standbySubscriptions });
     const lockPath = path.join(root, 'owner.json');
+    const originalOwnerId = JSON.parse(await fsp.readFile(lockPath, 'utf8')).ownerId;
     await fsp.writeFile(lockPath, ''); // corrupted empty lock
     const past = new Date(Date.now() - 6000);
     await fsp.utimes(lockPath, past, past);
@@ -138,6 +140,19 @@ test('bridge catalog, strict selection, metadata and cancellation', { timeout: 1
     await fsp.utimes(lockPath, past, past);
     assert.equal(await standby.ensureLeader(), true);
     assert.equal(JSON.parse(await fsp.readFile(lockPath, 'utf8')).pid, process.pid);
+    await standby.writeHeartbeat();
+    const successorLock = await fsp.readFile(lockPath, 'utf8');
+    const successorHeartbeat = await fsp.readFile(path.join(root, 'heartbeat.json'), 'utf8');
+    assert.notEqual(JSON.parse(successorLock).ownerId, originalOwnerId, 'each activation must have a unique ownership token');
+    assert.equal(JSON.parse(successorLock).ownerId, JSON.parse(successorHeartbeat).ownerId);
+    // The two test windows share a PID; only the per-instance token distinguishes them.
+    for (const disposable of subscriptions.splice(0)) disposable.dispose();
+    assert.equal(await fsp.readFile(lockPath, 'utf8'), successorLock, 'former leader disposal must preserve the successor lock');
+    assert.equal(await fsp.readFile(path.join(root, 'heartbeat.json'), 'utf8'), successorHeartbeat, 'former leader disposal must preserve the successor heartbeat');
+    assert.equal(await sandbox.ensureLeader(), false, 'a disposed instance must not reclaim leadership');
+    for (const disposable of standbySubscriptions.splice(0)) disposable.dispose();
+    assert.equal(fs.existsSync(lockPath), false, 'current leader disposal must remove its own lock');
+    assert.equal(fs.existsSync(path.join(root, 'heartbeat.json')), false, 'current leader disposal must remove its own heartbeat');
   } finally {
     for (const disposable of standbySubscriptions) disposable.dispose();
     for (const disposable of subscriptions) disposable.dispose();

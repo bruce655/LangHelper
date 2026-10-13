@@ -139,9 +139,11 @@ This is **not offline translation**: CLI still needs internet and its own
 Copilot sign-in. On Microsoft-managed devices, the install command uses CFS
 because public package registries are blocked.
 
-Native executables receive the prompt as an argument. PowerShell/CMD shims
-receive it through UTF-8 standard input to preserve multiline text and quotes;
-the CLI must support piped prompts.
+All CLI launchers (native executables and PowerShell/CMD shims) receive the
+prompt through UTF-8 standard input, preserving multiline text and quotes
+without Windows command-line length limits. The CLI must support piped prompts
+and `--silent` response-only output; LangHelper does not guess or remove footer
+labels from the translation.
 
 In a translation window, choose `copilot-cli`, enter a CLI model ID (check
 `/model` in the CLI), and click **Re-translate**. Switching the tray default to
@@ -180,6 +182,8 @@ for use with VS Code closed.
 4. **Copy result** (Alt+C) copies only Translation, not Notes.
    `AutoCopyResult=1` does this automatically after success. With multiple
    windows, the last successful completion overwrites the clipboard.
+   If the clipboard remains busy after short retries, the completed translation
+   is retained and the status asks you to use **Copy result**.
    **Esc** closes this window and cancels its job; the tray keeps running.
 
 `SingleWindow=0` (default) creates a new window per trigger. Each window has its

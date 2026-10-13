@@ -130,8 +130,9 @@ copilot            # 登入一次，然後輸入 /exit
 這**不是離線翻譯**：CLI 仍需要網路及自己的 Copilot 登入狀態。
 Microsoft 管理的裝置會封鎖公開套件來源，因此安裝命令使用 CFS。
 
-原生執行檔透過參數接收 prompt；PowerShell／CMD 啟動腳本則透過 UTF-8 標準輸入，
-保留多行文字與引號，因此 CLI 必須支援管線輸入的 prompt。
+所有 CLI 啟動方式（原生執行檔與 PowerShell／CMD 啟動腳本）均透過 UTF-8 標準輸入
+接收 prompt，保留多行文字與引號，並避免 Windows 命令列長度限制。
+CLI 必須支援管線輸入及 `--silent` 純回應輸出；LangHelper 不會猜測或刪除翻譯中的頁尾標籤。
 
 在翻譯視窗選擇 `copilot-cli`，輸入 CLI 模型 ID（可在 CLI 用 `/model` 查詢），
 再按 **Re-translate**。
@@ -167,6 +168,7 @@ Microsoft 管理的裝置會封鎖公開套件來源，因此安裝命令使用 
      包含模型與耗時。
 4. **Copy result**（Alt+C）只複製 Translation，不包含 Notes。
    `AutoCopyResult=1` 會在成功後自動複製；多視窗時，最後成功完成的結果會覆寫剪貼簿。
+   剪貼簿忙碌會短暫重試；仍失敗時保留已完成的翻譯，狀態列會提示使用 **Copy result**。
    **Esc** 關閉目前視窗並取消它的工作，系統匣程式仍繼續執行。
 
 `SingleWindow=0`（預設）會在每次觸發時建立新視窗，各自保留原文、模型選擇與工作。

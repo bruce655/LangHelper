@@ -66,7 +66,9 @@ Foundry 的 `1.5.1` 與上游 `2.0.0` 是分開演進的路線，因此日期較
 - 歷史與 last-result 寫入失敗（例如檔案被鎖定）不再把成功的翻譯標記為失敗，仍會顯示結果並自動複製。
 - Copilot CLI 的 prompt 一律以 stdin 傳入（含原生 `copilot.exe`），避免超過 Windows 32,767 字元命令列上限。
 - 修正 Copilot CLI 1.0.97 拒絕 `--deny-tool '*'` 的問題，改為明確拒絕 shell／write／read／url 工具；測試用假 CLI 同步驗證規則格式。
-- Copilot CLI 加上 `--silent`，並讓頁尾清理同時支援 `AI Credits 1.2` 與 `AI Credits: 1.2` 兩種格式。
+- Copilot CLI 使用 `--silent` 純回應輸出，不再猜測頁尾格式，避免誤刪以 `Changes:`、`Tokens:` 或 `Session:` 結尾的正常翻譯。
+- Bridge 鎖與心跳加入每次啟動專屬的 ownership token；退出前核對各檔案的擁有者，避免前任 leader 誤刪新 leader 的檔案。
+- 自動複製會短暫重試剪貼簿忙碌錯誤；最終失敗時保留成功翻譯與歷史，並在狀態列提示手動複製。
 - Bridge 回收毀損的 `owner.json` 前會先確認心跳已過期；leader 每次心跳會自我修復並在被接管時退為 Standby，避免雙 leader 重複請求。
 - Bridge 一律記住取消請求（保留 2 分鐘），即使取消比目標請求更早被掃描到，也不會送出給模型。
 - 歷史與 `last-result.txt` 各自獨立寫入，歷史被鎖定時「Show last result」仍是最新結果。

@@ -64,7 +64,15 @@ function Set-Status {
 function Set-ClipboardQuietly {
     param([string]$Text)
     $script:IgnoreClipboardUntil = (Get-Date).AddMilliseconds(1500)
-    [Windows.Forms.Clipboard]::SetText($Text)
+    for ($i = 0; $i -lt 8; $i++) {
+        try {
+            [Windows.Forms.Clipboard]::SetText($Text)
+            return
+        } catch [Runtime.InteropServices.ExternalException] {
+            if ($i -eq 7) { throw }
+            Start-Sleep -Milliseconds 40
+        }
+    }
 }
 
 function Get-ClipboardTextSafely {
@@ -251,7 +259,13 @@ function Complete-Translation {
         catch { Write-Log "could not write history: $($_.Exception.Message)" }
         try { [IO.File]::WriteAllText((Join-Path $script:DataDir 'last-result.txt'), $response.Content, $script:Utf8) }
         catch { Write-Log "could not write last result: $($_.Exception.Message)" }
-        if ($Window.AutoCopy -and $split.Main) { Set-ClipboardQuietly $split.Main }
+        if ($Window.AutoCopy -and $split.Main) {
+            try { Set-ClipboardQuietly $split.Main }
+            catch {
+                Set-Status $Window ($status + ' | Auto-copy failed; use Copy result.')
+                Write-Log "auto-copy failed: $($_.Exception.Message)"
+            }
+        }
     } catch {
         Set-Status $Window $_.Exception.Message -ErrorStatus
         Write-Log "translation failed: $($_.Exception.Message)"

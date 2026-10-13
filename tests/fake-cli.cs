@@ -37,13 +37,8 @@ class FakeCli {
             return 26;
         }
         Console.WriteLine("CLI translated");
-        if (Environment.GetEnvironmentVariable("LANGHELPER_TEST_FOOTER") == "colon") {
-            Console.WriteLine();
-            Console.WriteLine("Changes: +0 -0");
-            Console.WriteLine("AI Credits: 1.2 (3s)");
-            Console.WriteLine("Total duration: 3s");
-            Console.WriteLine("Resume: copilot --resume=abc");
-        }
+        string lastLine = Environment.GetEnvironmentVariable("LANGHELPER_TEST_LAST_LINE");
+        if (!String.IsNullOrEmpty(lastLine)) Console.WriteLine(lastLine);
         return 0;
     }
 }

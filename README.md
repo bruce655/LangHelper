@@ -139,11 +139,18 @@ This is **not offline translation**: CLI still needs internet and its own
 Copilot sign-in. On Microsoft-managed devices, the install command uses CFS
 because public package registries are blocked.
 
+Native executables receive the prompt as an argument. PowerShell/CMD shims
+receive it through UTF-8 standard input to preserve multiline text and quotes;
+the CLI must support piped prompts.
+
 In a translation window, choose `copilot-cli`, enter a CLI model ID (check
 `/model` in the CLI), and click **Re-translate**. Switching the tray default to
 CLI clears `Model` to avoid carrying a VS Code-only ID into CLI; enter a model
 and use **Save as defaults**. `auto` can attempt CLI fallback, but its UI catalog
-comes from VS Code, so configure explicit CLI mode for use with VS Code closed.
+comes from VS Code. If the catalog cannot be loaded, `auto` uses the saved
+explicit model ID and reports that CLI compatibility is unverified. Without a
+saved ID it reports an error. Configure explicit CLI mode to choose a CLI ID
+for use with VS Code closed.
 
 ## Auto-start on login
 
@@ -157,7 +164,7 @@ comes from VS Code, so configure explicit CLI mode for use with VS Code closed.
 1. Launch [LangHelper.cmd](LangHelper.cmd). A green "H" appears in the tray.
 2. Select any text anywhere in Windows → press **Ctrl+C, Ctrl+C**.
 3. The **translator window** opens:
-   - **Source** is editable; typing never sends a translation automatically.
+   - **Source** is editable; Enter inserts a newline, and typing never sends a translation automatically.
    - **Original clipboard snapshot** stays unchanged when Source is edited.
    - **Translation** contains the first fenced block (or the first Markdown
      section body); **Notes / back-translation** contains the remaining output.

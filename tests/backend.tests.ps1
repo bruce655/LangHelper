@@ -5,6 +5,7 @@ $repo = Split-Path -Parent $PSScriptRoot
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("langhelper-backend-test-" + [guid]::NewGuid().ToString('n'))
 $previousLocal = $env:LOCALAPPDATA
 $previousPath = $env:PATH
+$previousTestInput = $env:LANGHELPER_TEST_INPUT
 $env:LOCALAPPDATA = $testRoot
 $root = Get-LangHelperBridgeRoot
 [void][IO.Directory]::CreateDirectory((Join-Path $root 'requests'))
@@ -16,7 +17,9 @@ try {
     $inputFile = Join-Path $testRoot 'input.txt'
     $outputFile = Join-Path $testRoot 'output.txt'
     $raw = Join-Path $testRoot 'raw.md'
-    [IO.File]::WriteAllText($inputFile, 'Hello "quoted" input')
+    $source = 'Hello "quoted" input' + "`n" + [regex]::Unescape('\u7e41\u9ad4\u4e2d\u6587') + "`n" + 'C:\path with spaces\ %PATH% !value! & ^ | < >'
+    [IO.File]::WriteAllText($inputFile, $source)
+    $env:LANGHELPER_TEST_INPUT = $inputFile
     [IO.File]::WriteAllText($raw, 'Translate and return notes.')
     $shell = [powershell]::Create()
     $parameters = @{ Provider = 'vscode'; Model = 'claude-sonnet-5.5'; PromptFile = $raw; Features = 'POLISH'; InputFile = $inputFile; OutputFile = $outputFile; TimeoutSec = 5; PassThru = $true }
@@ -63,10 +66,56 @@ try {
     $cliResult = @($shell.Invoke())
     if ($shell.Streams.Error.Count) { throw ($shell.Streams.Error | Out-String) }
     Assert ($cliResult.Count -eq 1 -and $cliResult[0].Provider -eq 'copilot-cli' -and -not $cliResult[0].ModelVerified) 'CLI metadata must distinguish requested from verified model.'
-    Write-Output 'PASS: real backend raw prompt assembly, quoted input, model metadata, output compatibility, measured timeout/cancellation and missing prompt.'
+    $shell.Dispose(); $shell = $null
+    $shimDirectory = Join-Path $testRoot 'shim'
+    [void][IO.Directory]::CreateDirectory($shimDirectory)
+    $env:PATH = "$shimDirectory;$testRoot;$previousPath"
+    $shim = @'
+$ErrorActionPreference = 'Stop'
+if ($args -notcontains '--deny-tool' -or $args -notcontains '*') { throw 'Missing tool isolation.' }
+$input | & (Join-Path (Split-Path -Parent $PSScriptRoot) 'copilot.exe') @args
+exit $LASTEXITCODE
+'@
+    $shimPath = Join-Path $shimDirectory 'copilot.ps1'
+    [IO.File]::WriteAllText($shimPath, $shim)
+    foreach ($wrapper in @('ps1', 'cmd')) {
+        if ($wrapper -eq 'cmd') {
+            Remove-Item -LiteralPath $shimPath
+            [IO.File]::WriteAllText((Join-Path $shimDirectory 'copilot.cmd'), "@echo off`r`n`"$cliPath`" %*`r`n")
+        }
+        $shell = [powershell]::Create()
+        [void]$shell.AddCommand((Join-Path $repo 'langhelper.ps1')).AddParameters($parameters)
+        $wrapped = @($shell.Invoke())
+        if ($shell.Streams.Error.Count) { throw ($shell.Streams.Error | Out-String) }
+        Assert ($wrapped.Count -eq 1 -and $wrapped[0].Content -eq 'CLI translated') "$wrapper CLI wrapper changed quoted input."
+        $shell.Dispose(); $shell = $null
+    }
+    Remove-Item -LiteralPath (Join-Path $shimDirectory 'copilot.cmd')
+    Remove-Item -LiteralPath (Join-Path $root 'heartbeat.json')
+    $parameters.Provider = 'auto'
+    $shell = [powershell]::Create()
+    [void]$shell.AddCommand((Join-Path $repo 'langhelper.ps1')).AddParameters($parameters)
+    $offline = @($shell.Invoke())
+    if ($shell.Streams.Error.Count) { throw ($shell.Streams.Error | Out-String) }
+    Assert ($offline.Count -eq 1 -and $offline[0].Provider -eq 'copilot-cli' -and -not $offline[0].Fallback) 'Offline auto must dispatch CLI first.'
+    $shell.Dispose(); $shell = $null
+    foreach ($wordCount in @(300, 301)) {
+        [IO.File]::WriteAllText($inputFile, (('word ' * $wordCount).TrimEnd()))
+        & (Join-Path $repo 'langhelper.ps1') -Features SUMMARY -InputFile $inputFile -OutputFile $outputFile -DryRun
+        $assembled = [IO.File]::ReadAllText($outputFile)
+        $reminder = ($assembled -split 'REMINDER:')[-1]
+        Assert ($assembled.Contains('If the source is > 300 words')) 'SUMMARY word threshold was lost.'
+        Assert ($reminder.Contains('Enabled features: SUMMARY.') -and $reminder.Contains('only when their stated conditions are satisfied')) 'Reminder must preserve conditional sections.'
+        Assert (-not $reminder.Contains('## Key points')) 'Reminder must not make conditional Key points mandatory.'
+    }
+    & (Join-Path $repo 'langhelper.ps1') -Features 'BILINGUAL_EN_ZHTW,ROMANIZE' -InputFile $inputFile -OutputFile $outputFile -DryRun
+    $reminder = ([IO.File]::ReadAllText($outputFile) -split 'REMINDER:')[-1]
+    Assert ($reminder.Contains('Enabled features: BILINGUAL_EN_ZHTW, ROMANIZE.') -and -not $reminder.Contains('POLISH')) 'Reminder must not enable cross-referenced features.'
+    Write-Output 'PASS: prompt conditions, raw assembly, UTF-8/quotes/metacharacters through exe/ps1/cmd, offline auto dispatch, model metadata, output compatibility, timeout/cancellation and missing prompt.'
 } finally {
     if ($shell) { $shell.Dispose() }
     $env:LOCALAPPDATA = $previousLocal
     $env:PATH = $previousPath
+    $env:LANGHELPER_TEST_INPUT = $previousTestInput
     Remove-Item -LiteralPath $testRoot -Recurse -Force
 }

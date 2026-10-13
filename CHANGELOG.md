@@ -53,7 +53,11 @@ Foundry 的 `1.5.1` 與上游 `2.0.0` 是分開演進的路線，因此日期較
 - 修正 Windows PowerShell 5.1 的非 ASCII 標點編碼問題，PowerShell 7 啟動時轉用 Windows PowerShell 5.1。
 - 啟動或執行失敗時釋放單例鎖，避免無托盤圖示卻顯示「已在執行」。
 - 修正 CLI 提示文字的引號傳遞，限制工具使用並處理 timeout／取消。
+- 補強模型查詢期間的取消，避免取消後仍送出生成請求；原文 Enter 可插入換行。
+- `auto` 無法取得模型清單時可使用已儲存的明確 ID，並提示 CLI 相容性尚未驗證。
+- CLI 啟動腳本使用 UTF-8 標準輸入保留多行、引號與特殊字元；prompt reminder 保留條件式輸出規則。
 - 新增 Bridge、WinForms UI、INI、後端與 CLI 參數回歸測試；更新 CI 與 release 打包檔案清單。
+- Release 打包前執行 Bridge／UI／後端回歸測試，並包含中英文 README 與改版紀錄。
 - 精簡 README，更新安裝、模型選擇、多視窗、外部 prompt、歷史與隱私說明。
 
 ## 1.5.1 — 2026-09-14：Foundry 登入設定隔離

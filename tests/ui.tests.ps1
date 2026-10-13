@@ -41,6 +41,7 @@ try {
     $b = Show-Translation 'original B' -NoTranslate
     Assert ($script:Windows.Count -eq 2 -and $a.Form -ne $b.Form) 'Multi-window mode failed.'
     Assert (-not $a.Source.ReadOnly -and $a.Snapshot.ReadOnly -and $a.Notes.ReadOnly) 'Text area permissions incorrect.'
+    Assert $a.Source.AcceptsReturn 'Source Enter must insert a newline instead of invoking the default button.'
     Assert ($a.FeatureLabel.Text.Contains('Features') -and -not $a.PromptInfo.Modular) 'Raw prompt notice missing.'
     $a.Source.Text = 'slow'
     $b.Source.Text = 'fast'
@@ -48,6 +49,7 @@ try {
     foreach ($w in @($a, $b)) {
         $w.AutoCopy = $true
         $w.Models = @([pscustomobject]@{ id = 'verified-sonnet'; name = 'Sonnet 5.5'; family = 'claude-sonnet-5.5' })
+        $w.CatalogAvailable = $true
         [void]$w.Model.Items.Add('(Provider default)')
         [void]$w.Model.Items.Add('Sonnet 5.5')
         $w.Model.SelectedIndex = 1
@@ -74,7 +76,42 @@ try {
     $reused = Show-Translation 'new source' -NoTranslate
     Assert ($reused.Form -eq $b.Form -and $script:Windows.Count -eq 1) 'SingleWindow reuse failed.'
     $b.Form.Close()
-    Write-Output 'PASS: INI validation, split output, raw prompt notice, four controls, independent jobs/history, cancellation and single-window reuse.'
+    $previousLocal = $env:LOCALAPPDATA
+    try {
+        $env:LOCALAPPDATA = $testRoot
+        $script:Config.Provider = 'auto'
+        $script:Config.Model = 'saved-cli-model'
+        $offline = Show-Translation 'offline auto' -NoTranslate
+        Start-ModelRefresh $offline
+        $deadline = (Get-Date).AddSeconds(5)
+        while ($offline.CatalogJob -and (Get-Date) -lt $deadline) {
+            Complete-ModelRefresh $offline
+            Start-Sleep -Milliseconds 20
+        }
+        Assert (-not $offline.CatalogJob -and -not $offline.CatalogAvailable) 'Offline model lookup did not fail as expected.'
+        Assert ((Get-WindowModel $offline) -eq 'saved-cli-model') 'Offline auto must preserve the saved model.'
+        Assert ($offline.ModelHint.Text.Contains('not verified')) 'Offline auto must report catalog failure and unverified CLI compatibility.'
+        Start-Translation $offline
+        Assert ($null -ne $offline.Job) 'Offline auto was blocked before backend dispatch.'
+        Stop-WindowJob $offline
+        $offline.CatalogAvailable = $true
+        $offline.Model.SelectedIndex = -1
+        $rejected = $false
+        try { [void](Get-WindowModel $offline) } catch { $rejected = $true }
+        Assert $rejected 'A loaded catalog must still reject unavailable explicit models in auto mode.'
+        $offline.CatalogAvailable = $false
+        $offline.VSCodeModel = ''
+        $rejected = $false
+        try { [void](Get-WindowModel $offline) } catch { $rejected = $true }
+        Assert $rejected 'Offline auto must not guess a model when no model is saved.'
+        $offline.Provider.SelectedItem = 'vscode'
+        Stop-WindowJob $offline 'CatalogJob'
+        $rejected = $false
+        try { [void](Get-WindowModel $offline) } catch { $rejected = $true }
+        Assert $rejected 'VS Code mode must still require a valid catalog selection.'
+        $offline.Form.Close()
+    } finally { $env:LOCALAPPDATA = $previousLocal }
+    Write-Output 'PASS: INI validation, split output, multiline Source, raw prompt notice, independent jobs/history, cancellation, single-window reuse and offline auto selection.'
 } finally {
     if (Get-Variable Windows -Scope Script -ErrorAction SilentlyContinue) {
         foreach ($w in @($script:Windows.ToArray())) { $w.Form.Close(); $w.Form.Dispose() }

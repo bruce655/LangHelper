@@ -49,22 +49,22 @@ async function runRequest(req) {
     (req.model && String(req.model).trim()) ||
     vscode.workspace.getConfiguration('langhelper').get('model') ||
     '';
-  const model = await pickModel(family);
-
-  // The stable language model API has no system role, so instruction content is
-  // sent as the leading user turn.
-  const messages = (req.messages || []).map((m) =>
-    m && m.role === 'assistant'
-      ? vscode.LanguageModelChatMessage.Assistant(String(m.content == null ? '' : m.content))
-      : vscode.LanguageModelChatMessage.User(String(m && m.content != null ? m.content : ''))
-  );
-  if (!messages.length) throw new Error('Request contained no messages.');
-
   const cts = new vscode.CancellationTokenSource();
   if (req.id) state.cancellations.set(req.id, cts);
   const timeoutMs = Number(req.timeoutMs) > 0 ? Number(req.timeoutMs) : 120000;
   const timer = setTimeout(() => cts.cancel(), timeoutMs);
   try {
+    const model = await pickModel(family);
+    if (cts.token.isCancellationRequested || state.cancelled.has(req.id)) {
+      throw new Error('Request cancelled before model dispatch.');
+    }
+    // The stable API has no system role; instructions use the leading user turn.
+    const messages = (req.messages || []).map((m) =>
+      m && m.role === 'assistant'
+        ? vscode.LanguageModelChatMessage.Assistant(String(m.content == null ? '' : m.content))
+        : vscode.LanguageModelChatMessage.User(String(m && m.content != null ? m.content : ''))
+    );
+    if (!messages.length) throw new Error('Request contained no messages.');
     const response = await model.sendRequest(messages, {}, cts.token);
     let out = '';
     for await (const fragment of response.text) out += fragment;

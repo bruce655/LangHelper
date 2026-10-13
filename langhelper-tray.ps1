@@ -99,6 +99,8 @@ function Start-ModelRefresh {
     Stop-WindowJob $Window 'CatalogJob'
     $provider = [string]$Window.Provider.SelectedItem
     $Window.Model.Items.Clear()
+    $Window.Models = @()
+    $Window.CatalogAvailable = $false
     if ($provider -eq 'copilot-cli') {
         $Window.Model.DropDownStyle = 'DropDown'
         $Window.Model.Text = $Window.CliModel
@@ -129,6 +131,7 @@ function Complete-ModelRefresh {
         if (-not $data.Count) { throw 'Bridge returned no model catalog. Reinstall the bridge and reload VS Code.' }
         $Window.Models = @($data[-1].models)
         if (-not $Window.Models.Count) { throw 'No Copilot models are available to this VS Code account.' }
+        $Window.CatalogAvailable = $true
         [void]$Window.Model.Items.Add('(Provider default)')
         $selected = -1
         for ($i = 0; $i -lt $Window.Models.Count; $i++) {
@@ -145,7 +148,12 @@ function Complete-ModelRefresh {
         }
     } catch {
         $Window.ModelHint.Text = $_.Exception.Message
-        Set-Status $Window 'Model lookup failed. Check the Bridge installation and reload VS Code.' -ErrorStatus
+        if ($Window.Provider.SelectedItem -eq 'auto' -and $Window.VSCodeModel) {
+            [void]$Window.Model.Items.Add("Saved model [$($Window.VSCodeModel)] (unverified)")
+            $Window.Model.SelectedIndex = 0
+            $Window.ModelHint.Text += " Auto will try saved model $($Window.VSCodeModel); CLI compatibility is not verified."
+        }
+        Set-Status $Window $Window.ModelHint.Text -ErrorStatus
         Write-Log "model lookup failed: $($_.Exception.Message)"
     } finally {
         $job.Shell.Dispose()
@@ -159,6 +167,10 @@ function Get-WindowModel {
         if (-not $value) { throw 'Enter an explicit CLI model ID before translating.' }
         $Window.CliModel = $value
         return $value
+    }
+    if ($Window.Provider.SelectedItem -eq 'auto' -and -not $Window.CatalogAvailable) {
+        if (-not $Window.VSCodeModel) { throw 'Auto without a VS Code catalog requires a saved explicit model ID. Configure the CLI provider and save its model as defaults.' }
+        return [string]$Window.VSCodeModel
     }
     if ($Window.Model.SelectedIndex -lt 0) { throw 'Select an available VS Code model, or refresh the model list.' }
     if ($Window.Model.SelectedIndex -eq 0) { $Window.VSCodeModel = ''; return '' }
@@ -277,6 +289,7 @@ function New-TextArea {
     param([bool]$ReadOnly)
     $box = New-Object Windows.Forms.TextBox
     $box.Multiline = $true
+    $box.AcceptsReturn = -not $ReadOnly
     $box.ReadOnly = $ReadOnly
     $box.ScrollBars = 'Vertical'
     $box.Dock = 'Fill'
@@ -302,7 +315,7 @@ function New-TranslatorWindow {
         Status = (New-Object Windows.Forms.Label)
         Provider = (New-Object Windows.Forms.ComboBox); Model = (New-Object Windows.Forms.ComboBox)
         ModelHint = (New-Object Windows.Forms.Label); FeatureLabel = (New-Object Windows.Forms.Label)
-        Models = @(); VSCodeModel = $script:Config.Model; CliModel = ''
+        Models = @(); CatalogAvailable = $false; VSCodeModel = $script:Config.Model; CliModel = ''
         Job = $null; CatalogJob = $null; PendingTranslate = $false
         Features = $script:Config.Features; PromptFile = $prompt; PromptInfo = $info
         TimeoutSec = $script:Config.TimeoutSec; AutoCopy = ($script:Config.AutoCopyResult -eq '1')
@@ -381,7 +394,7 @@ function New-TranslatorWindow {
     $window.Model.Add_SelectedIndexChanged({
         param($s, $e)
         $w = $s.FindForm().Tag
-        if ($w.Provider.SelectedItem -ne 'copilot-cli' -and $s.SelectedIndex -ge 0) {
+        if ($w.CatalogAvailable -and $w.Provider.SelectedItem -ne 'copilot-cli' -and $s.SelectedIndex -ge 0) {
             $w.VSCodeModel = if ($s.SelectedIndex -eq 0) { '' } else { $w.Models[$s.SelectedIndex - 1].id }
         }
     })

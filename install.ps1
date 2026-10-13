@@ -1,7 +1,7 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-    Sets up LangHelper 2.0: installs the VS Code bridge extension, creates
+    Sets up LangHelper: installs the VS Code bridge extension, creates
     langhelper.ini, and optionally starts the tray app with Windows.
 
 .DESCRIPTION

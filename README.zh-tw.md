@@ -130,12 +130,16 @@ copilot            # 登入一次，然後輸入 /exit
 這**不是離線翻譯**：CLI 仍需要網路及自己的 Copilot 登入狀態。
 Microsoft 管理的裝置會封鎖公開套件來源，因此安裝命令使用 CFS。
 
+原生執行檔透過參數接收 prompt；PowerShell／CMD 啟動腳本則透過 UTF-8 標準輸入，
+保留多行文字與引號，因此 CLI 必須支援管線輸入的 prompt。
+
 在翻譯視窗選擇 `copilot-cli`，輸入 CLI 模型 ID（可在 CLI 用 `/model` 查詢），
 再按 **Re-translate**。
 將系統匣預設 Provider 切換至 CLI 時會清空 `Model`，避免沿用僅適用 VS Code 的 ID；
 請輸入模型並按 **Save as defaults**。
 `auto` 可以嘗試回退至 CLI，但 UI 模型清單來自 VS Code；
-若要在 VS Code 關閉時使用，請明確設定 CLI 模式。
+若清單無法載入，`auto` 會沿用已儲存的明確模型 ID，並提示 CLI 相容性尚未驗證；
+沒有儲存 ID 時會報錯。若要在 VS Code 關閉時選擇 CLI ID，請明確設定 CLI 模式。
 
 ## 登入 Windows 時自動啟動
 
@@ -149,7 +153,7 @@ Microsoft 管理的裝置會封鎖公開套件來源，因此安裝命令使用 
 1. 啟動 [LangHelper.cmd](LangHelper.cmd)，系統匣會出現綠色「H」。
 2. 在 Windows 任意程式選取文字，按 **Ctrl+C、Ctrl+C**。
 3. **翻譯視窗**開啟：
-   - **Source**：可編輯原文；輸入文字不會自動翻譯。
+   - **Source**：可編輯原文；Enter 插入換行，輸入文字不會自動翻譯。
    - **Original clipboard snapshot**：原始剪貼簿快照，不隨 Source 編輯而改變。
    - **Translation**：第一個 fenced 區塊，或第一個 Markdown 段落區段的內文。
      **Notes / back-translation**：其餘輸出。

@@ -7,14 +7,20 @@ const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 
-test('bridge catalog, strict selection, metadata and cancellation', async () => {
+test('bridge catalog, strict selection, metadata and cancellation', { timeout: 10000 }, async () => {
   const base = await fsp.mkdtemp(path.join(os.tmpdir(), 'langhelper-bridge-test-'));
   const subscriptions = [];
   const standbySubscriptions = [];
   let calls = 0;
+  let pendingSelection;
+  let selectionStarted;
+  let cancellationObserved;
   class CancellationTokenSource {
     constructor() { this.token = { isCancellationRequested: false }; }
-    cancel() { this.token.isCancellationRequested = true; }
+    cancel() {
+      this.token.isCancellationRequested = true;
+      if (cancellationObserved) cancellationObserved();
+    }
     dispose() {}
   }
   const model = {
@@ -31,7 +37,13 @@ test('bridge catalog, strict selection, metadata and cancellation', async () => 
     },
   };
   const vscode = {
-    lm: { selectChatModels: async () => [model] }, CancellationTokenSource,
+    lm: { selectChatModels: async () => {
+      if (pendingSelection) {
+        selectionStarted();
+        return pendingSelection;
+      }
+      return [model];
+    } }, CancellationTokenSource,
     LanguageModelError: class extends Error {},
     LanguageModelChatMessage: { User: (content) => ({ content }), Assistant: (content) => ({ content }) },
     workspace: { getConfiguration: () => ({ get: () => 'claude-sonnet-5.5' }) },
@@ -84,6 +96,20 @@ test('bridge catalog, strict selection, metadata and cancellation', async () => 
     await request('cancel', { action: 'cancel', targetId: 'slow' });
     await new Promise((r) => setTimeout(r, 100));
     assert.equal(fs.existsSync(path.join(root, 'responses', 'slow.json')), false);
+    let releaseSelection;
+    pendingSelection = new Promise((resolve) => { releaseSelection = resolve; });
+    const selecting = new Promise((resolve) => { selectionStarted = resolve; });
+    await request('selecting', { model: model.id, messages: [{ content: 'hello' }] });
+    await selecting;
+    const cancelled = new Promise((resolve) => { cancellationObserved = resolve; });
+    await request('cancel-selecting', { action: 'cancel', targetId: 'selecting' });
+    await cancelled;
+    cancellationObserved = null;
+    pendingSelection = null;
+    releaseSelection([model]);
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(calls, 2, 'cancel during model selection must not dispatch a completion');
+    assert.equal(fs.existsSync(path.join(root, 'responses', 'selecting.json')), false);
   } finally {
     for (const disposable of standbySubscriptions) disposable.dispose();
     for (const disposable of subscriptions) disposable.dispose();

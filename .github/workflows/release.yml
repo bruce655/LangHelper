@@ -61,6 +61,16 @@ jobs:
           node --check ./vscode-extension/extension.js
           if ($LASTEXITCODE -ne 0) { throw 'extension.js failed the syntax check.' }
 
+      - name: Test bridge and Windows PowerShell UI
+        shell: pwsh
+        run: |
+          node --test .\tests\bridge.test.js
+          if ($LASTEXITCODE -ne 0) { throw 'Bridge regression tests failed.' }
+          powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\ui.tests.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Windows PowerShell UI tests failed.' }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\backend.tests.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Backend regression tests failed.' }
+
       - name: Package release
         id: package
         shell: pwsh
@@ -78,7 +88,9 @@ jobs:
             'install.ps1',
             'langhelper.ini.example',
             'prompt.md',
-            'README.md'
+            'README.md',
+            'README.zh-tw.md',
+            'CHANGELOG.md'
           ) | ForEach-Object { Copy-Item $_ $staging }
           Copy-Item ./vscode-extension (Join-Path $staging 'vscode-extension') -Recurse
           [IO.File]::WriteAllText(

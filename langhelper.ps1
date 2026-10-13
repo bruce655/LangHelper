@@ -136,32 +136,12 @@ if ($isModular) {
     $systemPrompt = $core.Replace($marker, $featureText).TrimEnd()
     $userPrompt   = $clipboardSection
 
-    # Some chat-tuned models (e.g. gpt-5-chat) ignore the feature blocks for short
-    # input and answer with a single line. Append an explicit reminder listing the
-    # exact "## ..." sections the enabled features require, after the clipboard,
-    # where models weight instructions most heavily.
-    #
-    # A block can cross-reference another feature ("If [FEATURE: POLISH] is also
-    # enabled, add ## Polished (English)"). Those headings are conditional, so the
-    # reminder is built only from the spans whose governing feature is also
-    # selected - otherwise unticking POLISH still demands a Polished section.
-    $applicable = New-Object System.Collections.Generic.List[string]
-    foreach ($chunk in $featureChunks) {
-        # Each block opens with its own tag, so the split yields name/text pairs.
-        $parts = [regex]::Split($chunk, '\[FEATURE:\s*([A-Z0-9_]+)[^\]]*\]')
-        for ($i = 1; $i -lt $parts.Count; $i += 2) {
-            if ($selected -contains $parts[$i] -and ($i + 1) -lt $parts.Count) {
-                $applicable.Add($parts[$i + 1])
-            }
-        }
-    }
-    $headings = [regex]::Matches(([string]::Join("`n", $applicable)), '##[ \t]+[^\r\n]+') |
-        ForEach-Object { $_.Value.Trim() } |
-        Select-Object -Unique
-    if ($headings) {
-        $headingList = $headings -join ', '
+    # Preserve arbitrary feature conditions rather than inferring required headings.
+    $enabled = @($selected | Where-Object { $featureBlocks.ContainsKey($_) } | Select-Object -Unique)
+    if ($enabled.Count) {
+        $featureList = $enabled -join ', '
         $userPrompt = $userPrompt.TrimEnd() +
-            "`n`nREMINDER: Even if the clipboard text above is short, you MUST still output every required section, in order: $headingList. Do not answer with a single line, and do not skip or merge any section. Do not add any other section."
+            "`n`nREMINDER: Enabled features: $featureList. Follow their output headings and order exactly as specified above. Even for short input, include all unconditional required sections. Include conditional sections only when their stated conditions are satisfied, including source length, language and other enabled features. Do not skip or merge required sections, or add sections not requested by those instructions."
     }
 }
 else {
@@ -255,9 +235,13 @@ function Invoke-CopilotCli {
     $command = @'
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
+$OutputEncoding = [Text.UTF8Encoding]::new($false)
 $config = [IO.File]::ReadAllText((Join-Path (Get-Location) 'args.json')) | ConvertFrom-Json
-$arguments = @($config.arguments | ForEach-Object { $_ -replace '"', '\"' })
-& $config.executable @arguments
+$arguments = @($config.arguments)
+# Script shims may reparse native arguments; pipe the prompt as UTF-8 instead.
+$prompt = $arguments[1]
+$arguments = @($arguments | Select-Object -Skip 2)
+$prompt | & $config.executable @arguments
 exit $LASTEXITCODE
 '@
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))

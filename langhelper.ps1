@@ -1,59 +1,33 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-    LangHelper backend: assembles the prompt from prompt.md and calls a
-    chat-completions API.
+    LangHelper backend: assembles the prompt from prompt.md and sends it to a
+    GitHub Copilot backend.
 
 .DESCRIPTION
     Reads prompt.md from the script directory, extracts the Core block and any
-    requested [FEATURE: ...] blocks, injects the clipboard text, then posts the
-    assembled prompt to the Azure AI Foundry /chat/completions endpoint and
-    writes the response.
+    requested [FEATURE: ...] blocks, injects the clipboard text, then sends the
+    assembled prompt to the selected provider and writes the response.
 
-    GitHub Models (`gh models run`) was retired on 2026-07-30 and is no longer
-    a supported backend.
+.PARAMETER Provider
+    Which backend answers the prompt:
+      auto        - vscode when the bridge is alive, else copilot-cli.
+      vscode      - the LangHelper Bridge extension inside a running VS Code,
+                    using the Copilot models your VS Code is already signed in to.
+                    Fastest and the cheapest against a Copilot subscription.
+      copilot-cli - `copilot` with the prompt on stdin. Works with VS Code closed, but each call pays
+                    for the agent's own system prompt (tens of seconds, ~10 AI
+                    credits), so it is a fallback rather than a default.
 
 .PARAMETER Features
     Comma-separated feature names to enable (e.g. "POLISH,BILINGUAL_EN_ZHTW").
     Empty string means Core-only (translate to English).
 
 .PARAMETER Model
-    The *deployment name* you created in the portal, not the underlying model id.
-
-.PARAMETER Endpoint
-    Base URL of the Foundry resource. The standard /openai/v1/chat/completions
-    path is appended automatically when you supply only the resource root, so
-    both of these work:
-      https://my-res.openai.azure.com
-      https://my-res.services.ai.azure.com/openai/v1
-
-.PARAMETER EntraSubscription
-    Subscription id or name to acquire the Entra token from. Pin this when you
-    switch `az` accounts often, otherwise the token follows whatever `az account
-    set` last selected and the call fails with 401.
-
-    api-key auth is off on resources with disableLocalAuth=true, which Azure
-    Policy commonly enforces and re-applies on every write, so Entra ID is the
-    only path. Requires `az login` once, plus the "Cognitive Services OpenAI
-    User" role on the resource.
-
-.PARAMETER EntraTenant
-    Tenant id to acquire the Entra token from. Mutually exclusive with
-    -EntraSubscription in the Azure CLI, so it is only used when no subscription
-    is given. Prefer -EntraSubscription, which already implies its tenant.
-
-.PARAMETER AzureConfigDir
-    Directory used as AZURE_CONFIG_DIR while shelling out to `az`, so LangHelper
-    keeps its own Azure CLI profile and an unrelated `az login`/`az logout` in
-    your normal shell cannot break translation ("Subscription ... not found").
-    Defaults to %LOCALAPPDATA%\LangHelper\azure; it needs its own one-off
-    `az login`. Point it at %USERPROFILE%\.azure to share the default profile.
-
-.PARAMETER ReasoningEffort
-    Optional reasoning_effort value for reasoning models (none / minimal / low /
-    medium / high). Empty means the field is omitted, which is what non-reasoning
-    deployments need. Translation rarely benefits from reasoning, so 'none'
-    keeps latency and output-token cost down on gpt-5.1+ deployments.
+    For vscode, a Copilot model ID or family such as claude-sonnet-5.5; empty uses the
+    Bridge's langhelper.model setting, then its first available model. For copilot-cli, a
+    `copilot --model` value is required and an empty value is rejected.
+    auto also requires an explicit model ID for CLI fallback.
 
 .PARAMETER PromptFile
     Optional path to an external prompt/spec file. If supplied and it exists,
@@ -80,28 +54,30 @@
 #>
 [CmdletBinding()]
 param(
+    [ValidateSet('auto', 'vscode', 'copilot-cli')]
+    [string]$Provider = "vscode",
     [string]$Features = "",
-    [string]$Model = "gpt-5.4-mini",
-    [string]$Endpoint = "",
-    [string]$EntraSubscription = "",
-    [string]$EntraTenant = "",
-    [string]$AzureConfigDir = "",
-    [ValidateSet('', 'none', 'minimal', 'low', 'medium', 'high')]
-    [string]$ReasoningEffort = "",
+    [string]$Model = "",
     [string]$PromptFile = "",
     [Parameter(Mandatory)][string]$InputFile,
     [Parameter(Mandatory)][string]$OutputFile,
-    [int]$TimeoutSec = 120,
+    [ValidateRange(1, 3600)][int]$TimeoutSec = 120,
+    [switch]$PassThru,
     [switch]$DryRun
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Provider -eq 'auto' -and [string]::IsNullOrWhiteSpace($Model)) {
+    throw 'Auto requires an explicit model ID for CLI fallback. Use vscode for Provider default.'
+}
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $scriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $scriptDir 'langhelper-common.ps1')
 
 # Use the external prompt file when provided and present; otherwise the bundled one.
-if ($PromptFile -and (Test-Path -LiteralPath $PromptFile)) {
+if ($PromptFile) {
+    if (-not (Test-Path -LiteralPath $PromptFile)) { throw "Prompt file not found: $PromptFile" }
     $promptPath = (Resolve-Path -LiteralPath $PromptFile).Path
 } else {
     $promptPath = Join-Path $scriptDir 'prompt.md'
@@ -118,7 +94,7 @@ if ([string]::IsNullOrWhiteSpace($clipboardText)) { throw "Input is empty." }
 $md = [System.IO.File]::ReadAllText($promptPath, $utf8NoBom) -replace "`r`n", "`n"
 
 $marker = "<clipboard>`n{{PASTE_CLIPBOARD_HERE}}`n</clipboard>"
-$clipboardSection = "<clipboard>`n" + $clipboardText.TrimEnd() + "`n</clipboard>"
+$clipboardSection = "<clipboard>`n" + $clipboardText + "`n</clipboard>"
 
 # Decide which assembly mode to use: modular (prompt.md style) vs raw (skill spec).
 $coreMatch = [regex]::Match($md, '(?ms)##\s+Core[^\n]*\n+```[a-z]*\n(.*?)\n```')
@@ -165,19 +141,12 @@ if ($isModular) {
     $systemPrompt = $core.Replace($marker, $featureText).TrimEnd()
     $userPrompt   = $clipboardSection
 
-    # Some chat-tuned models (e.g. gpt-5-chat) ignore the feature blocks for short
-    # input and answer with a single line. Append an explicit reminder listing the
-    # exact "## ..." sections the enabled features require, after the clipboard,
-    # where models weight instructions most heavily.
-    if ($featureText) {
-        $headings = [regex]::Matches($featureText, '##[ \t]+[^\r\n]+') |
-            ForEach-Object { $_.Value.Trim() } |
-            Select-Object -Unique
-        if ($headings) {
-            $headingList = $headings -join ', '
-            $userPrompt = $userPrompt.TrimEnd() +
-                "`n`nREMINDER: Even if the clipboard text above is short, you MUST still output every required section, in order: $headingList. Do not answer with a single line, and do not skip or merge any section."
-        }
+    # Preserve arbitrary feature conditions rather than inferring required headings.
+    $enabled = @($selected | Where-Object { $featureBlocks.ContainsKey($_) } | Select-Object -Unique)
+    if ($enabled.Count) {
+        $featureList = $enabled -join ', '
+        $userPrompt = $userPrompt.TrimEnd() +
+            "`n`nREMINDER: Enabled features: $featureList. Follow their output headings and order exactly as specified above. Even for short input, include all unconditional required sections. Include conditional sections only when their stated conditions are satisfied, including source length, language and other enabled features. Do not skip or merge required sections, or add sections not requested by those instructions."
     }
 }
 else {
@@ -199,195 +168,168 @@ if ($DryRun) {
 }
 
 # --- Backend helpers -----------------------------------------------------------
-function Get-EntraAccessToken {
-    param(
-        [string]$Resource = 'https://cognitiveservices.azure.com',
-        [string]$Subscription = '',
-        [string]$Tenant = '',
-        [string]$ConfigDir = '',
-        [string]$CachePath = (Join-Path $env:LOCALAPPDATA 'LangHelper\entra-token.dat')
-    )
+function Test-BridgeAlive {
+    param([Parameter(Mandatory)][string]$Root, [int]$MaxAgeSec = 90)
 
-    # Own Azure CLI profile: an `az login`/`az logout` in the user's normal shell
-    # must not drop the subscription this tool is pinned to.
-    if (-not $ConfigDir) { $ConfigDir = Join-Path $env:LOCALAPPDATA 'LangHelper\azure' }
-
-    # Tokens are scoped, so a cached one is only reusable for the same target.
-    $scope = "$Resource|$Subscription|$Tenant|$ConfigDir"
-
-    # Shelling out to az costs ~1s, which is very visible for a clipboard-speed
-    # tool, so reuse the token until it is nearly expired.
-    if (Test-Path -LiteralPath $CachePath) {
-        try {
-            $secure = ConvertTo-SecureString -String ([System.IO.File]::ReadAllText($CachePath)).Trim()
-            $bstr   = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-            try   { $cached = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) | ConvertFrom-Json }
-            finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
-            if ($cached.scope -eq $scope -and [datetime]$cached.expiresOn -gt (Get-Date).AddMinutes(5)) {
-                return [string]$cached.token
-            }
-        } catch { }
-    }
-
-    if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
-        throw "LangHelper needs the Azure CLI on PATH. Install it, then run:  az login"
-    }
-
-    $azArgs = @('account', 'get-access-token', '--resource', $Resource, '--output', 'json')
-    # The CLI rejects --tenant together with --subscription; a subscription already
-    # pins the tenant, so it wins.
-    if     ($Subscription) { $azArgs += @('--subscription', $Subscription) }
-    elseif ($Tenant)       { $azArgs += @('--tenant', $Tenant) }
-
-    if (-not (Test-Path -LiteralPath $ConfigDir)) {
-        New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
-    }
-    # A fresh profile defaults to the WAM broker, whose refresh tokens are
-    # device-bound, so az could only ever mint the resource asked for at login.
-    $azConfigFile = Join-Path $ConfigDir 'config'
-    if (-not (Test-Path -LiteralPath $azConfigFile)) {
-        [System.IO.File]::WriteAllText($azConfigFile, "[core]`r`nenable_broker_on_windows = false`r`n")
-    }
-
-    $previousConfigDir = $env:AZURE_CONFIG_DIR
-    $env:AZURE_CONFIG_DIR = $ConfigDir
-    try     { $raw = & az @azArgs 2>&1 }
-    finally { $env:AZURE_CONFIG_DIR = $previousConfigDir }
-
-    if ($LASTEXITCODE -ne 0) {
-        $login = if ($Tenant) { "az login --tenant $Tenant" } else { 'az login' }
-        $hint  = "`$env:AZURE_CONFIG_DIR = '$ConfigDir'; $login"
-        throw "az account get-access-token failed. LangHelper uses its own Azure CLI profile in $ConfigDir. Sign in to it once with:`n$hint`n$raw"
-    }
-
-    try { $tok = ($raw | Out-String) | ConvertFrom-Json }
-    catch { throw "Could not parse the az token response.`n$raw" }
-    if (-not $tok.accessToken) { throw "az returned no accessToken.`n$raw" }
-
-    $expiresOn = if ($tok.expires_on) {
-        [System.DateTimeOffset]::FromUnixTimeSeconds([long]$tok.expires_on).LocalDateTime
-    } else {
-        [datetime]$tok.expiresOn
-    }
-
+    $hb = Join-Path $Root 'heartbeat.json'
+    if (-not (Test-Path -LiteralPath $hb)) { return $false }
     try {
-        $dir = Split-Path -Parent $CachePath
-        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-        $payload = @{
-            token     = [string]$tok.accessToken
-            expiresOn = $expiresOn.ToString('o')
-            scope     = $scope
-        } | ConvertTo-Json -Compress
-        # DPAPI: readable only by this Windows user on this machine.
-        $blob = ConvertTo-SecureString -String $payload -AsPlainText -Force | ConvertFrom-SecureString
-        [System.IO.File]::WriteAllText($CachePath, $blob)
-    } catch { }
-
-    return [string]$tok.accessToken
-}
-
-function Resolve-ChatCompletionsUrl {
-    param([Parameter(Mandatory)][string]$BaseUrl)
-
-    $u = $BaseUrl.Trim().TrimEnd('/')
-    if ($u -match '/chat/completions$') { return $u }
-    if ($u -notmatch '/v1$')            { $u = "$u/openai/v1" }
-    return "$u/chat/completions"
-}
-
-function Get-HttpErrorDetail {
-    param($ErrorRecord, [string]$Url)
-
-    $webResponse = $null
-    if ($ErrorRecord.Exception -is [System.Net.WebException]) {
-        $webResponse = $ErrorRecord.Exception.Response
+        $obj = [System.IO.File]::ReadAllText($hb) | ConvertFrom-Json
+        return ([datetime]$obj.updated).ToUniversalTime() -gt (Get-Date).ToUniversalTime().AddSeconds(-$MaxAgeSec)
+    } catch {
+        Write-Warning "Cannot read Bridge heartbeat: $($_.Exception.Message)"
+        return $false
     }
-    if (-not $webResponse) { return "$($ErrorRecord.Exception.Message) ($Url)" }
-
-    $body = ''
-    try {
-        $reader = New-Object System.IO.StreamReader($webResponse.GetResponseStream())
-        $body = $reader.ReadToEnd()
-        $reader.Close()
-    } catch { }
-
-    $status = [int]$webResponse.StatusCode
-
-    # Azure's content filter / prompt shield rejects the request before the model
-    # sees it, sometimes with an empty body, which otherwise surfaces as a bare 400.
-    if ($status -eq 400 -and ($body -match 'content_filter|jailbreak|ResponsibleAI' -or -not $body.Trim())) {
-        return @(
-            "Azure content filter blocked this request (HTTP 400).",
-            "The clipboard text tripped a safety or prompt-injection rule, so the model never saw it.",
-            "Try again with different wording, or remove text that reads like an instruction to the assistant."
-        ) -join "`n"
-    }
-
-    return ("HTTP {0} from {1}`n{2}" -f $status, $Url, $body)
 }
 
-function Invoke-ChatCompletion {
+function Invoke-VSCodeBridge {
     param(
-        [Parameter(Mandatory)][string]$Url,
-        [Parameter(Mandatory)][string]$Model,
         [Parameter(Mandatory)][string]$SystemPrompt,
         [Parameter(Mandatory)][string]$UserPrompt,
-        [string]$AccessToken = '',
-        [string]$ReasoningEffort = '',
+        [string]$Model = '',
         [int]$TimeoutSec = 120
     )
 
-    $headers = @{}
-    if ($AccessToken) { $headers['Authorization'] = "Bearer $AccessToken" }
-
+    # The stable VS Code language model API has no system role. Two separate user
+    # turns read as a stalled conversation and the model echoes the input, so the
+    # instructions and the clipboard go in one turn instead.
+    $combined = $SystemPrompt + "`n`n" + $UserPrompt
     $payload = @{
-        model    = $Model
-        messages = @(
-            @{ role = 'system'; content = $SystemPrompt },
-            @{ role = 'user';   content = $UserPrompt }
+        model     = $Model
+        timeoutMs = $TimeoutSec * 1000
+        messages  = @(
+            @{ role = 'user'; content = $combined }
         )
     }
-    if ($ReasoningEffort) { $payload['reasoning_effort'] = $ReasoningEffort }
-    $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes(($payload | ConvertTo-Json -Depth 6 -Compress))
 
-    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+    $obj = Invoke-LangHelperBridge -Payload $payload -TimeoutSec $TimeoutSec
+    return [pscustomobject]@{ content = [string]$obj.content; provider = 'vscode'; modelId = $obj.modelId; modelName = $obj.modelName; modelVerified = $true }
+}
 
+function Invoke-CopilotCli {
+    param(
+        [Parameter(Mandatory)][string]$SystemPrompt,
+        [Parameter(Mandatory)][string]$UserPrompt,
+        [string]$Model = '',
+        [int]$TimeoutSec = 300
+    )
+
+    if (-not $Model) { throw 'Copilot CLI requires an explicit model ID. Select the CLI provider and enter its model ID.' }
+    $copilot = Get-Command copilot -ErrorAction SilentlyContinue
+    if (-not $copilot) {
+        throw "The GitHub Copilot CLI is not on PATH. Install it with 'npm install -g @github/copilot', then run 'copilot' once to sign in."
+    }
+
+    $prompt = $SystemPrompt + "`n`n" + $UserPrompt
+    $work   = Join-Path ([System.IO.Path]::GetTempPath()) ("langhelper-cli-" + [guid]::NewGuid().ToString('n'))
+    New-Item -ItemType Directory -Path $work -Force | Out-Null
+    $stdout = Join-Path $work 'out.txt'
+    $stderr = Join-Path $work 'err.txt'
+
+    # The CLI is an agent, so tools, MCP servers and repo instructions are all
+    # turned off: LangHelper only needs one text completion.
+    # The prompt goes through stdin (not -p) so large Source text cannot exceed
+    # the Windows 32,767-character command-line limit.
+    $cliArgs = @(
+        '-s', '--no-color', '--log-level', 'none',
+        '--disable-builtin-mcps', '--no-custom-instructions', '--no-ask-user',
+        '--deny-tool', 'shell', '--deny-tool', 'write', '--deny-tool', 'read', '--deny-tool', 'url'
+    )
+    if ($Model) { $cliArgs += @('--model', $Model) }
+
+    $promptFile = Join-Path $work 'prompt.txt'
+    [IO.File]::WriteAllText($promptFile, $prompt, $utf8NoBom)
+    [IO.File]::WriteAllText((Join-Path $work 'args.json'), (@{ executable = $copilot.Source; arguments = $cliArgs } | ConvertTo-Json -Depth 4), $utf8NoBom)
+    $command = @'
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$OutputEncoding = [Text.UTF8Encoding]::new($false)
+$config = [IO.File]::ReadAllText((Join-Path (Get-Location) 'args.json')) | ConvertFrom-Json
+$arguments = @($config.arguments)
+# Script shims may reparse native arguments; pipe the prompt as UTF-8 instead.
+$prompt = [IO.File]::ReadAllText((Join-Path (Get-Location) 'prompt.txt'))
+$prompt | & $config.executable @arguments
+exit $LASTEXITCODE
+'@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    $proc = $null
     try {
-        $resp = Invoke-WebRequest -Uri $Url -Method Post -Headers $headers `
-            -ContentType 'application/json' -Body $bodyBytes `
-            -TimeoutSec $TimeoutSec -UseBasicParsing
-    } catch {
-        throw (Get-HttpErrorDetail $_ $Url)
-    }
-
-    # PS 5.1 decodes JSON bodies as Latin-1 when the response omits charset,
-    # which mangles CJK. Decode the raw stream as UTF-8 instead.
-    $json = [System.Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray())
-    $obj  = $json | ConvertFrom-Json
-
-    if (-not $obj.choices -or $obj.choices.Count -lt 1) {
-        throw "Unexpected response from $Url`n$json"
-    }
-    $content = $obj.choices[0].message.content
-    if ($content -is [System.Array]) { $content = [string]::Join('', $content) }
-    if ([string]::IsNullOrWhiteSpace($content)) {
-        $reason = $obj.choices[0].finish_reason
-        if ($reason -eq 'content_filter') {
-            throw "Azure content filter blocked the model's reply. The translation was produced but withheld. Try rephrasing the clipboard text."
+        $executable = $copilot.Source
+        $arguments = ($cliArgs | ForEach-Object { ConvertTo-LangHelperNativeArgument $_ }) -join ' '
+        $startParameters = @{ RedirectStandardInput = $promptFile }
+        if ([IO.Path]::GetExtension($executable) -ne '.exe') {
+            $executable = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+            $arguments = "-NoProfile -EncodedCommand $encoded"
+            $startParameters = @{}
         }
-        throw "Model returned empty content. Finish reason: $reason"
+        $proc = Start-Process -FilePath $executable -ArgumentList $arguments -WorkingDirectory $work `
+            -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr @startParameters
+        $processHandle = $proc.Handle
+        # Short waits let a pipeline stop reach the finally block promptly.
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)
+        while (-not $proc.WaitForExit(200)) {
+            if ([DateTime]::UtcNow -ge $deadline) { throw "The Copilot CLI did not finish within $TimeoutSec s." }
+        }
+        $proc.Refresh()
+        $raw = if (Test-Path -LiteralPath $stdout) { [System.IO.File]::ReadAllText($stdout) } else { '' }
+        if ($proc.ExitCode -ne 0) {
+            $err = if (Test-Path -LiteralPath $stderr) { [System.IO.File]::ReadAllText($stderr) } else { '' }
+            throw "copilot exited with $($proc.ExitCode).`n$err`n$raw"
+        }
+    } finally {
+        if ($proc -and -not $proc.HasExited) {
+            # /T terminates the whole tree (e.g. powershell -> cmd -> node), not only direct children.
+            & "$env:SystemRoot\System32\taskkill.exe" /PID $proc.Id /T /F *> $null
+            if (-not $proc.HasExited) { $proc.Kill() }
+            $proc.WaitForExit()
+        }
+        if ($proc) { $proc.Dispose() }
+        Remove-Item -LiteralPath $work -Recurse -Force
     }
-    return [string]$content
+
+    # --silent supplies response-only output; guessing footer labels can delete real translations.
+    $content = $raw.Trim()
+    if (-not $content) { throw "The Copilot CLI returned no text.`n$raw" }
+    return [pscustomobject]@{ content = $content; provider = 'copilot-cli'; modelId = $Model; modelName = $Model; modelVerified = $false }
 }
 
 # --- Call the model ------------------------------------------------------------
-if (-not $Endpoint) {
-    throw "No endpoint configured. Set Endpoint in langhelper.ini (see README: Azure AI Foundry setup)."
+$bridgeRoot = Get-LangHelperBridgeRoot
+
+$chain = switch ($Provider) {
+    'vscode'      { @('vscode') }
+    'copilot-cli' { @('copilot-cli') }
+    default {
+        if (Test-BridgeAlive -Root $bridgeRoot) { @('vscode', 'copilot-cli') } else { @('copilot-cli', 'vscode') }
+    }
 }
-$accessToken = Get-EntraAccessToken -Subscription $EntraSubscription -Tenant $EntraTenant -ConfigDir $AzureConfigDir
 
-$url      = Resolve-ChatCompletionsUrl -BaseUrl $Endpoint
-$response = Invoke-ChatCompletion -Url $url -Model $Model -SystemPrompt $systemPrompt -UserPrompt $userPrompt `
-    -AccessToken $accessToken -ReasoningEffort $ReasoningEffort -TimeoutSec $TimeoutSec
+$response = $null
+$failures = New-Object System.Collections.Generic.List[string]
+foreach ($p in $chain) {
+    try {
+        $response = switch ($p) {
+            'vscode'      { Invoke-VSCodeBridge -SystemPrompt $systemPrompt -UserPrompt $userPrompt -Model $Model -TimeoutSec $TimeoutSec }
+            'copilot-cli' { Invoke-CopilotCli -SystemPrompt $systemPrompt -UserPrompt $userPrompt -Model $Model -TimeoutSec $TimeoutSec }
+        }
+        Write-Verbose "LangHelper answered via provider '$p'."
+        break
+    } catch {
+        $failures.Add("[$p] $($_.Exception.Message)")
+    }
+}
 
-[System.IO.File]::WriteAllText($OutputFile, $response, $utf8NoBom)
+if ($null -eq $response) { throw ($failures -join "`n`n") }
+
+[System.IO.File]::WriteAllText($OutputFile, $response.content, $utf8NoBom)
+if ($PassThru) {
+    [pscustomobject]@{
+        Content = $response.content
+        Provider = $response.provider
+        ModelId = $response.modelId
+        ModelName = $response.modelName
+        ModelVerified = $response.modelVerified
+        Fallback = ($failures.Count -gt 0)
+        Failures = @($failures)
+    }
+}

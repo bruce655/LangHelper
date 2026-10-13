@@ -1,0 +1,44 @@
+{
+  "name": "langhelper-bridge",
+  "displayName": "LangHelper Bridge",
+  "description": "Serves LangHelper translation requests using the GitHub Copilot language models available in VS Code.",
+  "publisher": "langhelper",
+  "version": "2.1.0",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "langhelper.testConnection",
+        "title": "LangHelper: Test Copilot Connection"
+      },
+      {
+        "command": "langhelper.showLog",
+        "title": "LangHelper: Show Bridge Log"
+      },
+      {
+        "command": "langhelper.openBridgeFolder",
+        "title": "LangHelper: Open Bridge Folder"
+      }
+    ],
+    "configuration": {
+      "title": "LangHelper Bridge",
+      "properties": {
+        "langhelper.model": {
+          "type": "string",
+          "default": "claude-sonnet-5.5",
+          "description": "Copilot model ID or family. An unavailable explicit selection reports an error instead of silently choosing another model."
+        }
+      }
+    }
+  }
+}

@@ -167,6 +167,9 @@ for use with VS Code closed.
 2. Select any text anywhere in Windows → press **Ctrl+C, Ctrl+C**.
 3. The **translator window** opens:
    - **Source** is editable; Enter inserts a newline, and typing never sends a translation automatically.
+     Leading indentation and trailing whitespace are retained in the submitted
+     source and history; whitespace-only input is rejected. WinForms normalizes
+     displayed line endings to Windows CRLF.
    - **Original clipboard snapshot** stays unchanged when Source is edited.
    - **Translation** contains the first fenced block (or the first Markdown
      section body); **Notes / back-translation** contains the remaining output.
@@ -384,6 +387,11 @@ send prompts to Copilot.
 JSONL history contains source text and full results. Logs replace the Windows
 profile path with `%USERPROFILE%`, but errors can include other paths or content.
 Review both before sharing. No automatic history or log retention is provided.
+
+Bridge requests carry a UTC `expiresAt` deadline based on the caller's timeout.
+Expired queued requests are discarded and logged without a model call. Older
+requests without this field expire five minutes after their file modification
+time; cancellation requests are still processed regardless of age.
 
 ## Publishing a release (maintainers)
 

@@ -50,6 +50,8 @@ Foundry 的 `1.5.1` 與上游 `2.0.0` 是分開演進的路線，因此日期較
 - **Save as defaults** 儲存目前視窗的 Provider／模型／Features，作為新視窗預設；保留範本註解。
 
 ### 修正與驗證
+- 原文入口與 prompt 組合保留開頭縮排、尾端空白及空白行；純空白輸入仍會拒絕，快捷鍵的字數限制與警告維持不變。
+- Bridge 加入呼叫端 UTC `expiresAt` 期限，送出模型前重新檢查；舊請求沿用五分鐘檔案年齡限制，避免重啟後補送過期請求。
 - 修正 Windows PowerShell 5.1 的非 ASCII 標點編碼問題，PowerShell 7 啟動時轉用 Windows PowerShell 5.1。
 - 啟動或執行失敗時釋放單例鎖，避免無托盤圖示卻顯示「已在執行」。
 - 修正 CLI 提示文字的引號傳遞，限制工具使用並處理 timeout／取消。

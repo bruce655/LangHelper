@@ -125,6 +125,23 @@ try {
     Assert ($a.Result.Text -eq 'translated: clipboard') 'Clipboard failure lost the translation.'
     Assert ([IO.File]::ReadAllText((Join-Path $testRoot 'last-result.txt')).Contains('translated: clipboard')) 'Clipboard failure lost the persisted result.'
     function Set-ClipboardQuietly { param([string]$Text) $script:CopiedText = $Text }
+    $sourceWithWhitespace = "  first  `r`n`tsecond`t `r`n`r`n"
+    $a.Source.Text = $sourceWithWhitespace
+    Start-Translation $a
+    Assert ($a.Job.Source -ceq $sourceWithWhitespace) 'Job must retain exact Source whitespace.'
+    Assert ([IO.File]::ReadAllText($a.Job.InputFile) -ceq $sourceWithWhitespace) 'Backend input must retain exact Source whitespace.'
+    $deadline = (Get-Date).AddSeconds(10)
+    while ($a.Job -and (Get-Date) -lt $deadline) {
+        Complete-Translation $a
+        [Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 30
+    }
+    $lastHistory = (Get-Content -LiteralPath (Join-Path $testRoot 'history.jsonl') | Select-Object -Last 1) | ConvertFrom-Json
+    Assert ($lastHistory.source -ceq $sourceWithWhitespace) 'History must retain exact Source whitespace.'
+    $a.Source.Text = " `t`r`n"
+    Start-Translation $a
+    Assert (-not $a.Job -and $a.Status.Text -eq 'Source is empty.') 'Whitespace-only Source must be rejected.'
+    $a.Source.Text = 'close while translating'
     Start-Translation $a
     $a.Form.Close()
     Assert ($script:Windows.Count -eq 1 -and -not $a.Job) 'Closing a window did not cancel its job.'
@@ -167,6 +184,39 @@ try {
         Assert $rejected 'VS Code mode must still require a valid catalog selection.'
         $offline.Form.Close()
     } finally { $env:LOCALAPPDATA = $previousLocal }
+    Add-Type -TypeDefinition @'
+namespace LangHelper {
+    public static class ClipboardWatcher {
+        public static bool IsCtrlDown() { return true; }
+    }
+}
+'@
+    $showTranslation = ${function:Show-Translation}
+    $getClipboard = ${function:Get-ClipboardTextSafely}
+    try {
+        function Get-ClipboardTextSafely { return $script:TestClipboard }
+        function Show-Translation {
+            param([string]$Text)
+            $script:TriggeredText = $Text
+            return [pscustomobject]@{ ModelHint = [pscustomobject]@{ Text = '' } }
+        }
+        $script:Config.MinChars = '3'
+        $script:Config.MaxChars = '8'
+        foreach ($case in @(
+            @(' a ', ' a '), @('ab', $null), @(" `t ", $null),
+            @('  abcdef', '  abcdef'), @('  abcdefg', '  abcdef')
+        )) {
+            $script:TestClipboard = $case[0]
+            $script:TriggeredText = $null
+            $script:IgnoreClipboardUntil = [datetime]::MinValue
+            $script:LastClipboardTick = Get-Date
+            Invoke-ClipboardTrigger
+            Assert ($script:TriggeredText -ceq $case[1]) 'Clipboard whitespace or MinChars/MaxChars behavior changed.'
+        }
+    } finally {
+        Set-Item Function:Show-Translation $showTranslation
+        Set-Item Function:Get-ClipboardTextSafely $getClipboard
+    }
     Write-Output 'PASS: INI validation, split output, multiline Source, raw prompt notice, independent jobs/history, cancellation, single-window reuse and offline auto selection.'
 } finally {
     if (Get-Variable Windows -Scope Script -ErrorAction SilentlyContinue) {

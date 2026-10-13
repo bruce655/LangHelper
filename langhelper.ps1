@@ -90,7 +90,7 @@ if ([string]::IsNullOrWhiteSpace($clipboardText)) { throw "Input is empty." }
 $md = [System.IO.File]::ReadAllText($promptPath, $utf8NoBom) -replace "`r`n", "`n"
 
 $marker = "<clipboard>`n{{PASTE_CLIPBOARD_HERE}}`n</clipboard>"
-$clipboardSection = "<clipboard>`n" + $clipboardText.TrimEnd() + "`n</clipboard>"
+$clipboardSection = "<clipboard>`n" + $clipboardText + "`n</clipboard>"
 
 # Decide which assembly mode to use: modular (prompt.md style) vs raw (skill spec).
 $coreMatch = [regex]::Match($md, '(?ms)##\s+Core[^\n]*\n+```[a-z]*\n(.*?)\n```')

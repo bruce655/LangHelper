@@ -15,6 +15,7 @@ test('bridge catalog, strict selection, metadata and cancellation', { timeout: 1
   let pendingSelection;
   let selectionStarted;
   let cancellationObserved;
+  const logs = [];
   class CancellationTokenSource {
     constructor() { this.token = { isCancellationRequested: false }; }
     cancel() {
@@ -47,7 +48,7 @@ test('bridge catalog, strict selection, metadata and cancellation', { timeout: 1
     LanguageModelError: class extends Error {},
     LanguageModelChatMessage: { User: (content) => ({ content }), Assistant: (content) => ({ content }) },
     workspace: { getConfiguration: () => ({ get: () => 'claude-sonnet-5.5' }) },
-    window: { createOutputChannel: () => ({ appendLine() {}, dispose() {} }) },
+    window: { createOutputChannel: () => ({ appendLine(line) { logs.push(line); }, dispose() {} }) },
     commands: { registerCommand: () => ({ dispose() {} }) },
   };
   const sandbox = {
@@ -77,6 +78,29 @@ test('bridge catalog, strict selection, metadata and cancellation', { timeout: 1
     const standby = { ...sandbox, module: { exports: {} } };
     vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'vscode-extension', 'extension.js'), 'utf8'), standby);
     await standby.module.exports.activate({ subscriptions: standbySubscriptions });
+    async function queuedRequest(id, body, ageMs = 0) {
+      const name = `${id}.pending`;
+      const file = path.join(root, 'requests', name);
+      await fsp.writeFile(file, JSON.stringify({ id, ...body }));
+      const at = new Date(Date.now() - ageMs);
+      await fsp.utimes(file, at, at);
+      await sandbox.handleRequestFile(name);
+      assert.equal(fs.existsSync(file), false, 'handled queued request must be consumed');
+    }
+    const message = { model: model.id, messages: [{ content: 'hello' }] };
+    await queuedRequest('stale', message, 301000);
+    await queuedRequest('expired', { ...message, expiresAt: new Date(Date.now() - 1000).toISOString() });
+    await queuedRequest('stale-catalog', { action: 'models' }, 301000);
+    assert.equal(calls, 0, 'stale and expired requests must not dispatch');
+    for (const id of ['stale', 'expired', 'stale-catalog']) {
+      assert.equal(fs.existsSync(path.join(root, 'responses', `${id}.json`)), false);
+      assert.ok(logs.some((line) => line.includes(`discarded ${id}: request expired`)));
+    }
+    await queuedRequest('long-timeout-catalog', { action: 'models', expiresAt: new Date(Date.now() + 600000).toISOString() }, 301000);
+    assert.equal((await response('long-timeout-catalog')).ok, true, 'explicit deadlines must support configured timeouts longer than five minutes');
+    await queuedRequest('old-cancel', { action: 'cancel', targetId: 'cancelled-queued' }, 301000);
+    await queuedRequest('cancelled-queued', message);
+    assert.equal(calls, 0, 'old cancellation must still suppress its queued target');
     await request('catalog', { action: 'models' });
     assert.equal((await response('catalog')).models[0].id, model.id);
     assert.equal(calls, 0, 'catalog must not spend a completion');
@@ -110,6 +134,20 @@ test('bridge catalog, strict selection, metadata and cancellation', { timeout: 1
     await new Promise((r) => setTimeout(r, 100));
     assert.equal(calls, 2, 'cancel during model selection must not dispatch a completion');
     assert.equal(fs.existsSync(path.join(root, 'responses', 'selecting.json')), false);
+    pendingSelection = new Promise((resolve) => { releaseSelection = resolve; });
+    const expirySelection = new Promise((resolve) => { selectionStarted = resolve; });
+    const expiryFile = path.join(root, 'requests', 'expires-selecting.pending');
+    await fsp.writeFile(expiryFile, JSON.stringify({
+      id: 'expires-selecting', ...message, expiresAt: new Date(Date.now() + 150).toISOString(),
+    }));
+    const expiryHandler = sandbox.handleRequestFile('expires-selecting.pending');
+    await expirySelection;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    pendingSelection = null;
+    releaseSelection([model]);
+    await expiryHandler;
+    assert.equal(calls, 2, 'expiration during model selection must prevent dispatch');
+    assert.match((await response('expires-selecting')).error, /expired before model dispatch/);
 
     // A request cancelled before it is picked up must never reach the model.
     await request('cancel-early', { action: 'cancel', targetId: 'early' });

@@ -155,6 +155,8 @@ CLI 必須支援管線輸入及 `--silent` 純回應輸出；LangHelper 不會�
 2. 在 Windows 任意程式選取文字，按 **Ctrl+C、Ctrl+C**。
 3. **翻譯視窗**開啟：
    - **Source**：可編輯原文；Enter 插入換行，輸入文字不會自動翻譯。
+     傳送原文與歷史會保留開頭縮排及尾端空白；純空白輸入會被拒絕。
+     WinForms 顯示時會將換行正規化為 Windows CRLF。
    - **Original clipboard snapshot**：原始剪貼簿快照，不隨 Source 編輯而改變。
    - **Translation**：第一個 fenced 區塊，或第一個 Markdown 段落區段的內文。
      **Notes / back-translation**：其餘輸出。
@@ -355,6 +357,10 @@ JSONL 歷史包含原文與完整翻譯結果。
 日誌會將 Windows 使用者 profile 路徑替換為 `%USERPROFILE%`，
 但錯誤仍可能包含其他路徑或內容，分享前請檢查歷史與日誌。
 程式不會自動清理或限制歷史／日誌的保留時間。
+
+Bridge 請求依呼叫端的逾時設定加入 UTC `expiresAt` 期限。
+已過期的排隊請求會被捨棄並記錄日誌，不會呼叫模型。
+不含此欄位的舊請求以檔案修改時間加五分鐘判定過期；取消請求不受年齡限制，仍會處理。
 
 ## 發布版本（維護者）
 

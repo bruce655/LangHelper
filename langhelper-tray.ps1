@@ -190,8 +190,8 @@ function Get-WindowModel {
 function Start-Translation {
     param($Window)
     try {
-        $text = $Window.Source.Text.Trim()
-        if (-not $text) { throw 'Source is empty.' }
+        $text = $Window.Source.Text
+        if ([string]::IsNullOrWhiteSpace($text)) { throw 'Source is empty.' }
         $model = Get-WindowModel $Window
         Stop-WindowJob $Window
         $id = [guid]::NewGuid().ToString('n')
@@ -497,7 +497,8 @@ function Invoke-ClipboardTrigger {
         $script:LastClipboardTick = $now
         if (-not $double -or -not [LangHelper.ClipboardWatcher]::IsCtrlDown()) { return }
         $script:LastClipboardTick = [datetime]::MinValue
-        $text = (Get-ClipboardTextSafely).Trim()
+        $text = Get-ClipboardTextSafely
+        if ([string]::IsNullOrWhiteSpace($text)) { return }
         if ($text.Length -lt [int]$script:Config.MinChars) { return }
         $truncated = $text.Length -gt [int]$script:Config.MaxChars
         if ($truncated) { $text = $text.Substring(0, [int]$script:Config.MaxChars) }
@@ -575,7 +576,7 @@ namespace LangHelper {
     $open.Add_Click({ [void](Show-Translation '' -NoTranslate) })
     $now = $menu.Items.Add('Translate clipboard now')
     $now.Add_Click({
-        try { $text = Get-ClipboardTextSafely; if ($text.Trim()) { [void](Show-Translation $text.Trim()) } }
+        try { $text = Get-ClipboardTextSafely; if (-not [string]::IsNullOrWhiteSpace($text)) { [void](Show-Translation $text) } }
         catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'LangHelper') | Out-Null }
     })
     $providerMenu = New-Object Windows.Forms.ToolStripMenuItem 'Provider (new windows)'

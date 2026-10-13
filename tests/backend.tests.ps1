@@ -18,7 +18,7 @@ try {
     $inputFile = Join-Path $testRoot 'input.txt'
     $outputFile = Join-Path $testRoot 'output.txt'
     $raw = Join-Path $testRoot 'raw.md'
-    $source = 'Hello "quoted" input' + "`n" + [regex]::Unescape('\u7e41\u9ad4\u4e2d\u6587') + "`n" + 'C:\path with spaces\ %PATH% !value! & ^ | < >'
+    $source = "  `t" + 'Hello "quoted" input' + "`n" + [regex]::Unescape('\u7e41\u9ad4\u4e2d\u6587') + "`n" + 'C:\path with spaces\ %PATH% !value! & ^ | < >' + "  `n`t`n"
     [IO.File]::WriteAllText($inputFile, $source)
     $env:LANGHELPER_TEST_INPUT = $inputFile
     [IO.File]::WriteAllText($raw, 'Translate and return notes.')
@@ -34,6 +34,9 @@ try {
     }
     Assert ($null -ne $request) 'Backend did not issue a request.'
     Assert ($request.messages.Count -eq 1 -and $request.messages[0].content.Contains('Hello "quoted" input')) 'Prompt/input was not preserved.'
+    Assert ($request.messages[0].content.Contains("<clipboard>`n$source`n</clipboard>")) 'Bridge prompt lost source indentation or trailing whitespace.'
+    $expiry = [datetimeoffset]::Parse($request.expiresAt)
+    Assert ($expiry.UtcDateTime -gt [datetime]::UtcNow -and $expiry.UtcDateTime -le [datetime]::UtcNow.AddSeconds(5)) 'Bridge request deadline must match the client timeout.'
     Assert (-not $request.messages[0].content.Contains('[FEATURE: POLISH]')) 'Raw prompt must not append feature blocks.'
     $response = @{ id = $request.id; ok = $true; content = 'verified output'; modelId = 'actual-sonnet-id'; modelName = 'Sonnet 5.5'; provider = 'vscode' } | ConvertTo-Json
     $target = Join-Path $root "responses\$($request.id).json"
@@ -44,6 +47,10 @@ try {
     Assert ($result.Count -eq 1 -and $result[0].ModelId -eq 'actual-sonnet-id' -and $result[0].ModelVerified) 'Backend lost actual model metadata.'
     Assert ([IO.File]::ReadAllText($outputFile) -eq 'verified output') 'Output file compatibility failed.'
     $shell.Dispose(); $shell = $null
+    foreach ($promptPath in @($raw, (Join-Path $repo 'prompt.md'))) {
+        & (Join-Path $repo 'langhelper.ps1') -PromptFile $promptPath -Features TECHNICAL -InputFile $inputFile -OutputFile $outputFile -DryRun
+        Assert ([IO.File]::ReadAllText($outputFile).Contains("<clipboard>`n$source`n</clipboard>")) 'Raw/modular prompt must preserve exact source text.'
+    }
     $timedOut = $false
     $watch = [Diagnostics.Stopwatch]::StartNew()
     try { [void](Invoke-LangHelperBridge @{ action = 'models' } -TimeoutSec 1) } catch { $timedOut = $_.Exception.Message.Contains('within 1') }

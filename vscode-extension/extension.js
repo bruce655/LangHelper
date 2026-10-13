@@ -62,6 +62,7 @@ async function runRequest(req) {
     if (cts.token.isCancellationRequested || state.cancelled.has(req.id)) {
       throw new Error('Request cancelled before model dispatch.');
     }
+    if (requestExpired(req)) throw new Error('Request expired before model dispatch.');
     // The stable API has no system role; instructions use the leading user turn.
     const messages = (req.messages || []).map((m) =>
       m && m.role === 'assistant'
@@ -94,6 +95,16 @@ function describeError(err) {
   return String((err && err.message) || err);
 }
 
+function requestExpired(req) {
+  if (req.action === 'cancel') return false;
+  if (req.expiresAt != null) {
+    const deadline = typeof req.expiresAt === 'string' ? Date.parse(req.expiresAt) : NaN;
+    if (!Number.isFinite(deadline)) throw new Error('Invalid request expiresAt timestamp.');
+    return Date.now() >= deadline;
+  }
+  return false;
+}
+
 async function handleRequestFile(fileName) {
   const full = path.join(state.requestDir, fileName);
   if (state.inFlight.has(fileName)) return;
@@ -117,6 +128,16 @@ async function handleRequestFile(fileName) {
     }
 
     const id = String(req.id || path.basename(fileName, '.json'));
+    let stat;
+    try { stat = await fsp.stat(full); }
+    catch (err) {
+      if (err.code !== 'ENOENT') log.appendLine(`Could not check request age for ${id}: ${err.message}`);
+      return;
+    }
+    // Legacy requests have no deadline; retain their file-age limit through model selection.
+    if (req.action !== 'cancel' && req.expiresAt == null) {
+      req.expiresAt = new Date(stat.mtimeMs + STALE_REQUEST_MS).toISOString();
+    }
     await fsp.unlink(full).catch(() => {});
     if (req.action !== 'cancel' && state.cancelled.delete(id)) {
       log.appendLine(`[${new Date().toISOString()}] skipped ${id}: cancelled before it was dispatched`);
@@ -126,6 +147,10 @@ async function handleRequestFile(fileName) {
 
     let payload;
     try {
+      if (requestExpired(req)) {
+        log.appendLine(`[${new Date().toISOString()}] discarded ${id}: request expired`);
+        return;
+      }
       if (req.action === 'cancel') {
         const cts = state.cancellations.get(req.targetId);
         if (cts) cts.cancel();

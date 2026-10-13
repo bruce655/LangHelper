@@ -109,6 +109,7 @@ function Invoke-LangHelperBridge {
     if ($heartbeat.protocolVersion -ne 2) { throw 'Bridge update required. Run install.ps1 -NoStartup, then Developer: Reload Window in VS Code.' }
     $id = [guid]::NewGuid().ToString('n')
     $Payload.id = $id
+    $Payload.expiresAt = [datetime]::UtcNow.AddSeconds($TimeoutSec).ToString('o')
     $req = Join-Path $root "requests\$id.json"
     $res = Join-Path $root "responses\$id.json"
     $tmp = "$req.tmp"

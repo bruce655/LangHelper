@@ -134,10 +134,10 @@ Microsoft 管理的裝置會封鎖公開套件來源，因此安裝命令使用 
 接收 prompt，保留多行文字與引號，並避免 Windows 命令列長度限制。
 CLI 必須支援管線輸入及 `--silent` 純回應輸出；LangHelper 不會猜測或刪除翻譯中的頁尾標籤。
 
-在翻譯視窗選擇 `copilot-cli`，輸入 CLI 模型 ID（可在 CLI 用 `/model` 查詢），
-再按 **Re-translate**。
-將系統匣預設 Provider 切換至 CLI 時會清空 `Model`，避免沿用僅適用 VS Code 的 ID；
-請輸入模型並按 **Save as defaults**。
+在翻譯視窗選擇 `copilot-cli` 時，模型欄會自動帶入 INI 的 `Model` 設定；
+可依需求改用 CLI 支援的模型 ID（可在 CLI 用 `/model` 查詢），再按 **Re-translate**。
+將系統匣預設 Provider 切換至 CLI 時也會沿用 INI 的 `Model`；如有需要可在視窗修改模型，
+再按 **Save as defaults**。
 `auto` 可以嘗試回退至 CLI，但 UI 模型清單來自 VS Code；
 若清單無法載入，`auto` 會沿用已儲存的明確模型 ID，並提示 CLI 相容性尚未驗證；
 沒有儲存 ID 時會報錯。若要在 VS Code 關閉時選擇 CLI ID，請明確設定 CLI 模式。
@@ -231,7 +231,7 @@ Copy-Item langhelper.ini.example langhelper.ini
 |---|---|---|---|
 | `Provider` | `auto`／`vscode`／`copilot-cli` | `vscode` | 新視窗使用的 Provider。 |
 | `Features` | 以逗號分隔的標籤 | `POLISH,BILINGUAL_EN_ZHTW` | 僅模組化 prompt 使用，raw prompt 忽略此設定。 |
-| `Model` | 單一模型 ID／family，或留空 | `claude-sonnet-5.5` | 明確指定 Sonnet 5.5。VS Code 模型不可用會報錯，不默默替換；CLI 視窗需要明確輸入 ID。 |
+| `Model` | 單一模型 ID／family，或留空 | `claude-sonnet-5.5` | VS Code 明確指定模型；選擇 CLI 時作為模型欄預填值。VS Code 模型不可用會報錯，不默默替換。 |
 | `DoubleCopyMs` | 毫秒 | `700` | 兩次剪貼簿更新可視為雙重複製的最大間隔。 |
 | `MinChars`／`MaxChars` | 正整數 | `1`／`8000` | 雙重複製輸入少於 MinChars 時忽略，多於 MaxChars 時截斷並警告。只限制快捷鍵觸發，不限制手動編輯 Source 或系統匣翻譯命令。 |
 | `TimeoutSec` | 秒，1～3600 | `120` | 兩種 Provider 的翻譯逾時時間。 |

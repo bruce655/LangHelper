@@ -27,6 +27,7 @@ catch {
     [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Invalid LangHelper settings') | Out-Null
     throw
 }
+$script:DefaultModel = [string]$script:Config.Model
 $script:DataDir = Split-Path -Parent (Get-LangHelperBridgeRoot)
 $script:LogDir = Join-Path $script:Root 'logs'
 $script:Utf8 = New-Object Text.UTF8Encoding $false
@@ -434,7 +435,15 @@ function New-TranslatorWindow {
         $w = $s.FindForm().Tag
         if ($w.Job) { Stop-WindowJob $w; Set-Status $w 'Provider changed; previous translation cancelled.' }
         $w.PendingTranslate = $false
+        if ($s.SelectedItem -eq 'copilot-cli' -and -not $w.CliModel) {
+            $w.CliModel = [string]$script:Config.Model
+        }
         Start-ModelRefresh $w
+    })
+    $window.Model.Add_TextChanged({
+        param($s, $e)
+        $w = $s.FindForm().Tag
+        if ($w.Provider.SelectedItem -eq 'copilot-cli') { $w.CliModel = $s.Text }
     })
     $window.Model.Add_SelectedIndexChanged({
         param($s, $e)
@@ -603,8 +612,9 @@ namespace LangHelper {
                 $script:Config.Provider = [string]$s.Tag
                 # Model IDs are provider-specific; do not carry a VS Code ID into CLI,
                 # but keep a custom VS Code model when moving between vscode and auto.
-                if ($s.Tag -eq 'copilot-cli') { $script:Config.Model = '' }
-                elseif ($previous -eq 'copilot-cli' -or -not [string]$script:Config.Model) { $script:Config.Model = 'claude-sonnet-5.5' }
+                if ($s.Tag -ne 'copilot-cli' -and ($previous -eq 'copilot-cli' -or -not [string]$script:Config.Model)) {
+                    $script:Config.Model = $script:DefaultModel
+                }
                 Save-Config
             } catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'LangHelper') | Out-Null }
         })

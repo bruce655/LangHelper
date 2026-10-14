@@ -3,7 +3,7 @@
 ; auto may use CLI if VS Code fails; the UI reports the fallback.
 Provider=vscode
 
-; One VS Code model ID/family, or one explicit CLI model ID.
+; VS Code model ID/family, or CLI model ID; also prefilled when selecting copilot-cli.
 ; Refresh models in the window to see the account's VS Code catalog.
 ; Sonnet 5.5 is requested explicitly: unavailable models report an error.
 Model=claude-sonnet-5.5

@@ -145,10 +145,11 @@ without Windows command-line length limits. The CLI must support piped prompts
 and `--silent` response-only output; LangHelper does not guess or remove footer
 labels from the translation.
 
-In a translation window, choose `copilot-cli`, enter a CLI model ID (check
-`/model` in the CLI), and click **Re-translate**. Switching the tray default to
-CLI clears `Model` to avoid carrying a VS Code-only ID into CLI; enter a model
-and use **Save as defaults**. `auto` can attempt CLI fallback, but its UI catalog
+In a translation window, choosing `copilot-cli` automatically fills the model
+field from the INI `Model` setting. Change it to a CLI-supported model ID if
+needed (check `/model` in the CLI), then click **Re-translate**. Switching the
+tray default to CLI also uses the INI `Model` value; edit the model in the
+window and use **Save as defaults** if needed. `auto` can attempt CLI fallback, but its UI catalog
 comes from VS Code. If the catalog cannot be loaded, `auto` uses the saved
 explicit model ID and reports that CLI compatibility is unverified. Without a
 saved ID it reports an error. Configure explicit CLI mode to choose a CLI ID
@@ -252,7 +253,7 @@ Edit settings by hand, then tray → **Reload config (new windows)**.
 |---|---|---|---|
 | `Provider` | `auto` / `vscode` / `copilot-cli` | `vscode` | Provider for new windows. |
 | `Features` | comma-separated tags | `POLISH,BILINGUAL_EN_ZHTW` | Enabled blocks for modular prompts only; raw prompts ignore this setting. |
-| `Model` | one model ID/family or empty | `claude-sonnet-5.5` | Explicit Sonnet 5.5 selection. An unavailable VS Code model is an error, not a silent substitution. CLI requires an explicit ID in its window. |
+| `Model` | one model ID/family or empty | `claude-sonnet-5.5` | Explicit VS Code model; prefilled in the model field when selecting CLI. An unavailable VS Code model is an error, not a silent substitution. |
 | `DoubleCopyMs` | milliseconds | `700` | How close together the two clipboard updates must be to count as a double copy. |
 | `MinChars` / `MaxChars` | positive integers | `1` / `8000` | Double-copy input below `MinChars` is ignored; above `MaxChars` it is truncated with a warning. These are trigger limits, not limits on manually edited Source or the tray Translate command. |
 | `TimeoutSec` | seconds, 1–3600 | `120` | Translation timeout for either provider. |

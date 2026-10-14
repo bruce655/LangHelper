@@ -4,7 +4,8 @@ $repo = Split-Path -Parent $PSScriptRoot
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("langhelper-ui-test-" + [guid]::NewGuid().ToString('n'))
 [void][IO.Directory]::CreateDirectory($testRoot)
 $configPath = Join-Path $testRoot 'langhelper.ini'
-Copy-Item -LiteralPath (Join-Path $repo 'langhelper.ini.example') -Destination $configPath
+$customIni = [IO.File]::ReadAllText((Join-Path $repo 'langhelper.ini.example')).Replace('Model=claude-sonnet-5.5', 'Model=ini-custom-model')
+[IO.File]::WriteAllText($configPath, $customIni, (New-Object Text.UTF8Encoding $false))
 function Assert($condition, $message) { if (-not $condition) { throw $message } }
 try {
     . (Join-Path $repo 'langhelper-tray.ps1') -ConfigFile $configPath -TestMode
@@ -15,7 +16,7 @@ try {
     $script:CopiedText = ''
     function Set-ClipboardQuietly { param([string]$Text) $script:CopiedText = $Text }
     $cfg = Read-LangHelperConfig $configPath
-    Assert ($cfg.Provider -eq 'vscode' -and $cfg.Model -eq 'claude-sonnet-5.5') 'Wrong defaults.'
+    Assert ($cfg.Provider -eq 'vscode' -and $cfg.Model -eq 'ini-custom-model') 'Wrong defaults.'
     Assert ($cfg.SingleWindow -eq '0' -and $cfg.AutoCopyResult -eq '1') 'Wrong window/copy defaults.'
     Assert (-not $cfg.Contains('SaveHistory')) 'SaveHistory must be removed.'
     $cfg.Model = 'one,two'
@@ -23,7 +24,7 @@ try {
     $rejected = $false
     try { [void](Read-LangHelperConfig $configPath) } catch { $rejected = $true }
     Assert $rejected 'Comma-separated models must be rejected.'
-    $cfg.Model = 'claude-sonnet-5.5'
+    $cfg.Model = 'ini-custom-model'
     Save-LangHelperConfig $cfg $configPath (Join-Path $repo 'langhelper.ini.example')
     Assert ([IO.File]::ReadAllText($configPath).Contains('; Provider for new windows')) 'Config comments were lost.'
     $cfg.Provider = 'VSCODE'
@@ -150,6 +151,15 @@ try {
     Assert $rejected 'Auto must reject Provider default when a catalog is loaded.'
     $a.Model.SelectedIndex = 1
     Assert ((Get-WindowModel $a) -eq 'explicit-id') 'Auto must still accept an explicit model.'
+    $a.Provider.SelectedItem = 'copilot-cli'
+    Assert ($a.Model.Text -eq 'ini-custom-model' -and $a.CliModel -eq 'ini-custom-model') 'Selecting CLI must prefill the model configured in INI.'
+    $a.Model.Text = 'custom-cli-model'
+    $a.Provider.SelectedItem = 'vscode'
+    Stop-WindowJob $a 'CatalogJob'
+    $a.Provider.SelectedItem = 'copilot-cli'
+    Assert ($a.Model.Text -eq 'custom-cli-model') 'Switching providers must preserve an entered CLI model.'
+    $a.Provider.SelectedItem = 'auto'
+    Stop-WindowJob $a 'CatalogJob'
     $script:ProviderMenu = New-Object Windows.Forms.ToolStripMenuItem 'Provider'
     foreach ($provider in @('vscode', 'copilot-cli', 'auto')) {
         $item = New-Object Windows.Forms.ToolStripMenuItem $provider
